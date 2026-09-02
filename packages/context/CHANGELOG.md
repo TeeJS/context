@@ -1,5 +1,15 @@
 # @neuledge/context
 
+## 1.2.5
+
+### Patch Changes
+
+- [`104c4e6`](https://github.com/neuledge/context/commit/104c4e646bac625e64e126e9f4b45bf3fabe6bfd) Thanks [@TeeJS](https://github.com/TeeJS)! - Falling back from better-sqlite3 to the sql.js (WebAssembly) engine now prints a warning instead of happening silently, and `context serve` reports which SQLite engine it is using. Set `CONTEXT_REQUIRE_NATIVE_SQLITE=1` to make startup fail instead of falling back, for deployments that must never run the in-memory engine.
+
+- [`866ed97`](https://github.com/neuledge/context/commit/866ed9744e50bd9622645c81174d25900e92e3c6) Thanks [@TeeJS](https://github.com/TeeJS)! - Limit registry download sizes to protect local storage from oversized packages.
+
+- [`3e6d1a0`](https://github.com/neuledge/context/commit/3e6d1a021842ab67d7c1089a1dfe4c11a106fbfb) Thanks [@TeeJS](https://github.com/TeeJS)! - `context serve --http` now caps concurrent sessions (`CONTEXT_MAX_SESSIONS`, default 64) and closes sessions idle for longer than `CONTEXT_SESSION_IDLE_TIMEOUT` seconds (default 1800), so clients that disappear without closing their session no longer accumulate in memory. A first request that is not a valid `initialize` no longer leaves an orphaned transport behind.
+
 ## 1.2.4
 
 ### Patch Changes
