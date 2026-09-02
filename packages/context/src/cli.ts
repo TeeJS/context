@@ -56,7 +56,7 @@ import {
   type MarkdownFile,
 } from "./package-builder.js";
 import { type SearchResult, search } from "./search.js";
-import { ContextServer } from "./server.js";
+import { ContextServer, type HttpServerOptions } from "./server.js";
 import {
   getPackageFileName,
   isAllowedLibrary,
@@ -1225,13 +1225,56 @@ program
             : 8080;
         const host = options.host ?? "127.0.0.1";
 
-        const { port: actualPort } = await server.startHTTP({ port, host });
+        let limits: HttpLimits;
+        try {
+          limits = httpLimitsFromEnv(process.env);
+        } catch (err) {
+          console.error(`Error: ${(err as Error).message}`);
+          process.exit(1);
+        }
+
+        const { port: actualPort } = await server.startHTTP({
+          port,
+          host,
+          ...limits,
+        });
         console.error(`Listening on http://${host}:${actualPort}/mcp`);
       } else {
         await server.start();
       }
     },
   );
+
+export type HttpLimits = Pick<
+  HttpServerOptions,
+  "maxSessions" | "sessionIdleMs"
+>;
+
+/**
+ * Session limits for `serve --http`, read from the environment so a container
+ * can be tuned without changing its command line. Unset or empty means "use
+ * the default"; anything else that is not a positive integer is a startup
+ * error, so a typo can never silently disable a limit.
+ */
+export function httpLimitsFromEnv(env: NodeJS.ProcessEnv): HttpLimits {
+  const idleSeconds = positiveIntEnv(env, "CONTEXT_SESSION_IDLE_TIMEOUT");
+  return {
+    maxSessions: positiveIntEnv(env, "CONTEXT_MAX_SESSIONS"),
+    sessionIdleMs: idleSeconds === undefined ? undefined : idleSeconds * 1000,
+  };
+}
+
+function positiveIntEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): number | undefined {
+  const raw = env[name]?.trim();
+  if (!raw) return undefined;
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    throw new Error(`${name} must be a positive integer, got "${env[name]}"`);
+  }
+  return Number(raw);
+}
 
 function formatSearchResult(result: SearchResult): string {
   if (result.results.length === 0) {
