@@ -623,6 +623,8 @@ context query nextjs 'middleware authentication'
 2. Smart filtering keeps results within token budget
 3. Your AI gets focused, accurate documentation in under 10ms
 
+**SQLite engines:** Context uses the native `better-sqlite3` engine, which reads packages straight from disk. If the native binding cannot be loaded, it falls back to `sql.js` (WebAssembly), which reads each whole package into memory and is slower. The fallback prints a warning, and `context serve` reports the engine in use at startup. For deployments that must never run the in-memory engine, set `CONTEXT_REQUIRE_NATIVE_SQLITE=1`: startup then fails with the load error instead of falling back.
+
 ---
 
 ## :question: FAQ
