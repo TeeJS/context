@@ -449,3 +449,93 @@ describe("ContextServer HTTP transport", () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe("ContextServer HTTP session limits", () => {
+  const clients: Client[] = [];
+  let httpServer: Server | undefined;
+
+  afterEach(async () => {
+    await Promise.all(clients.map((c) => c.close().catch(() => {})));
+    clients.length = 0;
+    if (httpServer) {
+      const server = httpServer;
+      httpServer = undefined;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  async function startServer(options: {
+    maxSessions?: number;
+    sessionIdleMs?: number;
+  }): Promise<string> {
+    const result = await new ContextServer(new PackageStore()).startHTTP({
+      port: 0,
+      ...options,
+    });
+    httpServer = result.server;
+    return `http://127.0.0.1:${result.port}/mcp`;
+  }
+
+  async function connect(url: string) {
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    clients.push(client);
+    const transport = new StreamableHTTPClientTransport(new URL(url));
+    await client.connect(transport);
+    return { client, transport };
+  }
+
+  function ping(url: string, sessionId?: string): Promise<Response> {
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "Mcp-Protocol-Version": "2025-03-26",
+        ...(sessionId ? { "Mcp-Session-Id": sessionId } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    });
+  }
+
+  it("rejects new sessions beyond maxSessions until one is terminated", async () => {
+    const url = await startServer({ maxSessions: 1 });
+    const first = await connect(url);
+
+    await expect(connect(url)).rejects.toThrow(/Too many sessions/);
+
+    await first.transport.terminateSession();
+    await expect(connect(url)).resolves.toBeDefined();
+  });
+
+  it("closes sessions that stay idle past sessionIdleMs", async () => {
+    const url = await startServer({ sessionIdleMs: 200 });
+    const { client, transport } = await connect(url);
+    const sessionId = transport.sessionId as string;
+    expect(sessionId).toBeDefined();
+
+    // Drop the client without a DELETE, the way a crashed agent would.
+    await client.close();
+    expect((await ping(url, sessionId)).status).toBe(200);
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await ping(url, sessionId)).status).toBe(404);
+  });
+
+  it("keeps a session alive while its SSE stream is open", async () => {
+    const url = await startServer({ sessionIdleMs: 200 });
+    const { client } = await connect(url);
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await expect(client.listTools()).resolves.toBeDefined();
+  });
+
+  it("does not count a rejected first request as a session", async () => {
+    const url = await startServer({ maxSessions: 1 });
+
+    // A non-initialize first request is rejected by the transport...
+    expect((await ping(url)).status).toBe(400);
+
+    // ...and must not have consumed the only session slot.
+    await expect(connect(url)).resolves.toBeDefined();
+  });
+});

@@ -1,4 +1,8 @@
-import { createServer } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -36,6 +40,92 @@ export interface ContextServerOptions {
    * is locked to a fixed set.
    */
   allowedLibraries?: ReadonlySet<string>;
+}
+
+export const DEFAULT_MAX_SESSIONS = 64;
+export const DEFAULT_SESSION_IDLE_MS = 30 * 60 * 1000;
+
+export interface HttpServerOptions {
+  port: number;
+  /** Interface to bind (default: 127.0.0.1). */
+  host?: string;
+  /** Concurrent session ceiling; new sessions beyond it get HTTP 503. */
+  maxSessions?: number;
+  /** A session with no request and no open stream for this long is closed. */
+  sessionIdleMs?: number;
+}
+
+interface Session {
+  transport: StreamableHTTPServerTransport;
+  lastActivity: number;
+  /** Open standalone SSE streams; a session holding one is never idle. */
+  openStreams: number;
+}
+
+/**
+ * Live HTTP sessions, bounded in count and reaped when idle, so clients that
+ * disappear without a DELETE cannot grow server memory without limit.
+ */
+class SessionRegistry {
+  private readonly sessions = new Map<string, Session>();
+  private readonly sweeper: ReturnType<typeof setInterval>;
+
+  constructor(
+    private readonly maxSessions: number,
+    private readonly idleMs: number,
+  ) {
+    this.sweeper = setInterval(
+      () => this.reapIdle(),
+      Math.min(idleMs / 2, 60_000),
+    );
+    this.sweeper.unref();
+  }
+
+  get(id: string): Session | undefined {
+    return this.sessions.get(id);
+  }
+
+  isFull(): boolean {
+    return this.sessions.size >= this.maxSessions;
+  }
+
+  add(id: string, transport: StreamableHTTPServerTransport): void {
+    this.sessions.set(id, {
+      transport,
+      lastActivity: Date.now(),
+      openStreams: 0,
+    });
+  }
+
+  /** Record activity. A GET holds a stream open until its response closes. */
+  touch(session: Session, req: IncomingMessage, res: ServerResponse): void {
+    session.lastActivity = Date.now();
+    if (req.method !== "GET") return;
+    session.openStreams++;
+    res.once("close", () => {
+      session.openStreams--;
+      session.lastActivity = Date.now();
+    });
+  }
+
+  async close(id: string): Promise<void> {
+    const session = this.sessions.get(id);
+    this.sessions.delete(id);
+    await session?.transport.close();
+  }
+
+  private reapIdle(): void {
+    const cutoff = Date.now() - this.idleMs;
+    for (const [id, session] of this.sessions) {
+      if (session.openStreams === 0 && session.lastActivity < cutoff) {
+        this.close(id).catch(() => {});
+      }
+    }
+  }
+
+  stop(): void {
+    clearInterval(this.sweeper);
+  }
 }
 
 /**
@@ -99,17 +189,17 @@ export class ContextServer {
    *
    * @returns The HTTP server instance and the port it's listening on.
    */
-  async startHTTP(options: {
-    port: number;
-    host?: string;
-  }): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
+  async startHTTP(
+    options: HttpServerOptions,
+  ): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
     await initDatabase();
     this.registerTools();
 
     const host = options.host ?? "127.0.0.1";
-
-    // Track transports by session ID for multi-client support
-    const transports = new Map<string, StreamableHTTPServerTransport>();
+    const sessions = new SessionRegistry(
+      options.maxSessions ?? DEFAULT_MAX_SESSIONS,
+      options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS,
+    );
 
     const httpServer = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -119,13 +209,13 @@ export class ContextServer {
         return;
       }
 
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      const session = sessionId ? sessions.get(sessionId) : undefined;
+
       // Handle DELETE for session termination
       if (req.method === "DELETE") {
-        const sessionId = req.headers["mcp-session-id"] as string | undefined;
-        const transport = sessionId ? transports.get(sessionId) : undefined;
-        if (sessionId && transport) {
-          await transport.close();
-          transports.delete(sessionId);
+        if (sessionId && session) {
+          await sessions.close(sessionId);
           res.writeHead(200).end();
         } else {
           res.writeHead(404).end("Session not found");
@@ -134,17 +224,31 @@ export class ContextServer {
       }
 
       // For GET and POST, route to existing transport or create new one
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-      if (sessionId && transports.has(sessionId)) {
-        // Existing session
-        await transports.get(sessionId)?.handleRequest(req, res);
+      if (session) {
+        sessions.touch(session, req, res);
+        await session.transport.handleRequest(req, res);
         return;
       }
 
-      if (sessionId && !transports.has(sessionId)) {
-        // Invalid session ID
+      if (sessionId) {
+        // Unknown or expired session ID
         res.writeHead(404).end("Session not found");
+        return;
+      }
+
+      if (sessions.isFull()) {
+        res
+          .writeHead(503, {
+            "Content-Type": "application/json",
+            "Retry-After": "5",
+          })
+          .end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32000, message: "Too many sessions" },
+              id: null,
+            }),
+          );
         return;
       }
 
@@ -157,10 +261,10 @@ export class ContextServer {
       });
 
       transport.onclose = () => {
-        transports.delete(newSessionId);
+        sessions.close(newSessionId).catch(() => {});
       };
 
-      transports.set(newSessionId, transport);
+      sessions.add(newSessionId, transport);
 
       // Each new transport gets its own ContextServer sharing the same store
       const sessionCtx = new ContextServer(this.store, {
@@ -168,9 +272,18 @@ export class ContextServer {
       });
       sessionCtx.registerTools();
 
-      await sessionCtx.mcp.connect(transport);
-      await transport.handleRequest(req, res);
+      try {
+        await sessionCtx.mcp.connect(transport);
+        await transport.handleRequest(req, res);
+      } finally {
+        // The SDK assigns a session ID only to a valid initialize request. Any
+        // other first request was rejected, so drop the transport instead of
+        // letting failed handshakes accumulate in the registry.
+        if (!transport.sessionId) await sessions.close(newSessionId);
+      }
     });
+
+    httpServer.on("close", () => sessions.stop());
 
     return new Promise((resolve) => {
       httpServer.listen(options.port, host, () => {

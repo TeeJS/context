@@ -559,6 +559,20 @@ context serve --libs react next@15.0.4
 
 The HTTP transport uses the [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) protocol, enabling multiple clients on the local network to connect to a single server instance. The endpoint is available at `http://<host>:<port>/mcp`.
 
+The HTTP server bounds its own resource use so clients that disappear without closing their session cannot exhaust it. Tune the limits with environment variables (positive integers; an invalid value is a startup error):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTEXT_MAX_SESSIONS` | `64` | Maximum concurrent MCP sessions. New sessions beyond this get HTTP 503 with a `Retry-After` header. |
+| `CONTEXT_SESSION_IDLE_TIMEOUT` | `1800` | Seconds a session may sit with no requests and no open SSE stream before the server closes it. A client whose session was closed gets HTTP 404 and must re-initialize. |
+
+The HTTP server bounds its own resource use so clients that disappear without closing their session cannot exhaust it. Tune the limits with environment variables (positive integers; an invalid value is a startup error):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTEXT_MAX_SESSIONS` | `64` | Maximum concurrent MCP sessions. New sessions beyond this get HTTP 503 with a `Retry-After` header. |
+| `CONTEXT_SESSION_IDLE_TIMEOUT` | `1800` | Seconds a session may sit with no requests and no open SSE stream before the server closes it. A client whose session was closed gets HTTP 404 and must re-initialize. |
+
 ### `context query <library> <topic>`
 
 Query documentation directly from the command line. Useful for testing and debugging.

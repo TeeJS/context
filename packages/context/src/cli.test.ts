@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   detectSourceType,
   fetchWebPage,
+  httpLimitsFromEnv,
   packageNameFromUrl,
   parseLibSpec,
   parseRegistryPackage,
@@ -581,5 +582,40 @@ describe("resolveRemoveTarget", () => {
     expect(resolveRemoveTarget("missing", installed)).toEqual({
       error: ["Package not found: missing"],
     });
+  });
+});
+
+describe("httpLimitsFromEnv", () => {
+  it("returns no limits when the variables are unset or empty", () => {
+    expect(httpLimitsFromEnv({})).toEqual({
+      maxSessions: undefined,
+      sessionIdleMs: undefined,
+    });
+    expect(
+      httpLimitsFromEnv({
+        CONTEXT_MAX_SESSIONS: "",
+        CONTEXT_SESSION_IDLE_TIMEOUT: "  ",
+      }),
+    ).toEqual({ maxSessions: undefined, sessionIdleMs: undefined });
+  });
+
+  it("parses positive integers and converts the idle timeout to milliseconds", () => {
+    expect(
+      httpLimitsFromEnv({
+        CONTEXT_MAX_SESSIONS: "8",
+        CONTEXT_SESSION_IDLE_TIMEOUT: "90",
+      }),
+    ).toEqual({ maxSessions: 8, sessionIdleMs: 90_000 });
+  });
+
+  it("rejects values that would silently disable a limit", () => {
+    for (const bad of ["0", "-5", "1.5", "abc", "10s"]) {
+      expect(() => httpLimitsFromEnv({ CONTEXT_MAX_SESSIONS: bad })).toThrow(
+        /CONTEXT_MAX_SESSIONS must be a positive integer/,
+      );
+      expect(() =>
+        httpLimitsFromEnv({ CONTEXT_SESSION_IDLE_TIMEOUT: bad }),
+      ).toThrow(/CONTEXT_SESSION_IDLE_TIMEOUT must be a positive integer/);
+    }
   });
 });
