@@ -21,7 +21,7 @@ const { version } = require("../package.json") as { version: string };
 
 import { loadAuth, saveAuth } from "./auth.js";
 import { getServerUrl } from "./config.js";
-import { initDatabase } from "./database.js";
+import { getDatabaseBackend, initDatabase } from "./database.js";
 import { downloadPackage, searchPackages } from "./download.js";
 import { extractArticleMarkdown } from "./extract-html.js";
 import {
@@ -1215,6 +1215,9 @@ program
         console.error("Context MCP Server starting...");
         console.error("No packages installed. Run: context add <package.db>");
       }
+
+      await initDatabase();
+      console.error(`SQLite engine: ${getDatabaseBackend()}`);
 
       const server = new ContextServer(store, { allowedLibraries });
 

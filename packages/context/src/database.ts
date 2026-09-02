@@ -25,7 +25,7 @@ export interface DatabaseConnection {
   close(): void;
 }
 
-type Backend = "better-sqlite3" | "sql.js";
+export type Backend = "better-sqlite3" | "sql.js";
 
 let backend: Backend | null = null;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic module loading
@@ -41,19 +41,57 @@ let sqlJsApi: any = null;
 export async function initDatabase(): Promise<void> {
   if (backend) return;
 
-  try {
-    betterSqlite3Constructor = _require("better-sqlite3");
+  const native = loadNativeDriver(process.env.CONTEXT_REQUIRE_NATIVE_SQLITE);
+  if (native) {
+    betterSqlite3Constructor = native;
     backend = "better-sqlite3";
-  } catch {
-    const sqlJs = await import("sql.js-fts5");
-    const initSqlJs = sqlJs.default;
-    // Load WASM binary manually — older sql.js-fts5 uses fetch() with a bare
-    // path which fails in newer Node.js versions that require a proper URL.
-    const wasmPath = _require.resolve("sql.js-fts5/dist/sql-wasm.wasm");
-    const wasmBinary = readFileSync(wasmPath);
-    sqlJsApi = await initSqlJs({ wasmBinary });
-    backend = "sql.js";
+    return;
   }
+
+  const sqlJs = await import("sql.js-fts5");
+  const initSqlJs = sqlJs.default;
+  // Load WASM binary manually — older sql.js-fts5 uses fetch() with a bare
+  // path which fails in newer Node.js versions that require a proper URL.
+  const wasmPath = _require.resolve("sql.js-fts5/dist/sql-wasm.wasm");
+  const wasmBinary = readFileSync(wasmPath);
+  sqlJsApi = await initSqlJs({ wasmBinary });
+  backend = "sql.js";
+}
+
+/** The SQLite engine in use, or null before `initDatabase()` has run. */
+export function getDatabaseBackend(): Backend | null {
+  return backend;
+}
+
+/**
+ * Load better-sqlite3, or return null so the caller can fall back to sql.js.
+ * The fallback reads whole databases into memory, so a deployment that must
+ * never run that way sets CONTEXT_REQUIRE_NATIVE_SQLITE=1 and fails at
+ * startup instead of degrading silently.
+ */
+export function loadNativeDriver(
+  requireNative: string | undefined,
+  load: () => unknown = () => _require("better-sqlite3"),
+): unknown {
+  try {
+    return load();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    if (isEnabled(requireNative)) {
+      throw new Error(
+        `better-sqlite3 failed to load and CONTEXT_REQUIRE_NATIVE_SQLITE is set: ${reason}`,
+      );
+    }
+    console.error(
+      `Warning: better-sqlite3 failed to load (${reason}). Falling back to sql.js, which reads whole databases into memory.`,
+    );
+    return null;
+  }
+}
+
+function isEnabled(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true";
 }
 
 /**
