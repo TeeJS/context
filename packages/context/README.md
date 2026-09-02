@@ -338,6 +338,12 @@ context browse react
 
 Download and install a pre-built package from the registry server.
 
+Registry downloads are limited to 512 MiB by default so a broken or
+compromised registry cannot fill local storage. Set
+`CONTEXT_MAX_DOWNLOAD_BYTES` to a positive byte count to choose a different
+limit. The declared `Content-Length` and the bytes actually streamed are both
+checked. An unset or blank value uses the default.
+
 ```bash
 # Install latest version
 context install npm/next

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
   getPackageFileName,
@@ -19,6 +20,46 @@ import {
 } from "./store.js";
 
 const DATA_DIR = join(homedir(), ".context", "packages");
+const DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
+function getMaxDownloadBytes(): number {
+  const configured = process.env.CONTEXT_MAX_DOWNLOAD_BYTES;
+  if (configured === undefined) return DEFAULT_MAX_DOWNLOAD_BYTES;
+  const normalized = configured.trim();
+  if (normalized === "") return DEFAULT_MAX_DOWNLOAD_BYTES;
+
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(
+      "CONTEXT_MAX_DOWNLOAD_BYTES must be a positive integer byte count",
+    );
+  }
+
+  const maxBytes = Number(normalized);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error(
+      "CONTEXT_MAX_DOWNLOAD_BYTES must be a positive integer byte count",
+    );
+  }
+
+  return maxBytes;
+}
+
+function createDownloadLimitStream(maxBytes: number): Transform {
+  let downloadedBytes = 0;
+
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      downloadedBytes += chunk.byteLength;
+      if (downloadedBytes > maxBytes) {
+        callback(
+          new Error(`Download exceeded the ${maxBytes} byte size limit`),
+        );
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
 
 export interface SearchResultEntry {
   registry: string;
@@ -60,6 +101,7 @@ export async function downloadPackage(
   name: string,
   version: string,
 ): Promise<PackageInfo> {
+  const maxBytes = getMaxDownloadBytes();
   const url = `${serverUrl}/packages/${encodeURIComponent(registry)}/${encodeURIComponent(name)}/${encodeURIComponent(version)}/download`;
   const response = await fetch(url);
 
@@ -73,6 +115,23 @@ export async function downloadPackage(
     throw new Error("Download failed: no response body");
   }
 
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (!/^\d+$/.test(contentLength) || !Number.isSafeInteger(declaredBytes)) {
+      await response.body.cancel();
+      throw new Error(
+        `Download failed: invalid Content-Length ${contentLength}`,
+      );
+    }
+    if (declaredBytes > maxBytes) {
+      await response.body.cancel();
+      throw new Error(
+        `Download size ${declaredBytes} exceeds the ${maxBytes} byte limit`,
+      );
+    }
+  }
+
   // Download to a temp file first, then validate and move
   mkdirSync(DATA_DIR, { recursive: true });
   const safeName = name.replaceAll("/", "__");
@@ -84,7 +143,7 @@ export async function downloadPackage(
     const nodeStream = Readable.fromWeb(
       response.body as import("stream/web").ReadableStream,
     );
-    await pipeline(nodeStream, fileStream);
+    await pipeline(nodeStream, createDownloadLimitStream(maxBytes), fileStream);
 
     // Validate the package
     const info = readPackageInfo(tempPath);
