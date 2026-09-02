@@ -306,8 +306,19 @@ Run Context as a containerized HTTP server for multi-client or Kubernetes deploy
 ```bash
 # Run from the repository root (required for the monorepo lockfile)
 docker build -t context:local -f packages/context/Dockerfile .
-docker run --rm -p 8080:8080 context:local
+docker run --rm -p 8080:8080 \
+  --mount source=context-data,target=/home/node/.context \
+  context:local
 ```
+
+The image runs as the unprivileged `node` user. Mount `/home/node/.context` to
+persist downloaded documentation packages and server configuration across
+container replacements. The built-in healthcheck verifies that the HTTP server
+is accepting requests on port 8080.
+
+For a bind mount instead of the named volume above, make the host directory
+writable by UID/GID `1000:1000` (for example, with `chown 1000:1000`) before
+starting the container.
 
 The container starts Context with HTTP transport on port 8080, accessible at `http://localhost:8080/mcp`. The image uses a multi-stage build with `node:22-bookworm-slim` for native module compatibility.
 
