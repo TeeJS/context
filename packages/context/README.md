@@ -301,7 +301,22 @@ context add ./packages/my-lib@2.0.db
 
 ## :whale: Docker
 
-Run Context as a containerized HTTP server for multi-client or Kubernetes deployments:
+Run Context as a containerized HTTP server for multi-client or Kubernetes deployments.
+
+Pre-built `linux/amd64` images are published to GitHub Container Registry by the `Docker` workflow:
+
+```bash
+docker run --rm -p 8080:8080 \
+  --mount source=context-data,target=/home/node/.context \
+  ghcr.io/teejs/context:latest
+```
+
+| Tag | Moves when |
+|-----|------------|
+| `latest`, `<version>` | the package version changes on `main`, which is the commit each npm release is published from |
+| `main`, `sha-<short>` | every push to `main` that touches the package |
+
+To build the image yourself:
 
 ```bash
 # Run from the repository root (required for the monorepo lockfile)

@@ -1,0 +1,88 @@
+name: Docker
+
+# Publishes the HTTP-transport image to GHCR so hosts such as Unraid pull a
+# registry image instead of building locally.
+#
+# Every push to main that touches the package refreshes `main` and a `sha-*`
+# tag. `latest` and the version tag move only when the package version changes,
+# which is the "Version Packages" merge the release workflow publishes from, so
+# the image and the npm release always come from the same commit.
+#
+# The tag trigger is deliberately absent: the release workflow pushes tags with
+# GITHUB_TOKEN, and GitHub never starts another workflow from those pushes.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/context/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/docker.yml'
+  workflow_dispatch:
+    inputs:
+      tag_release:
+        description: 'Also tag this build as latest and as the package version'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  publish:
+    name: Publish image
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Decide tags
+        id: tags
+        env:
+          TAG_RELEASE: ${{ inputs.tag_release }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version=$(jq -r .version packages/context/package.json)
+          previous=$(git show HEAD~1:packages/context/package.json 2>/dev/null | jq -r .version || true)
+          tags="$image:main"$'\n'"$image:sha-${GITHUB_SHA::7}"
+          if [ "$version" != "$previous" ] || [ "$TAG_RELEASE" = "true" ]; then
+            tags="$tags"$'\n'"$image:latest"$'\n'"$image:$version"
+          fi
+          echo "$tags"
+          { echo "tags<<EOF"; echo "$tags"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Unraid's update check only understands Docker manifest media types and
+      # trips over attestation entries, so the push is Docker-flavoured and
+      # attestations are off. Single-platform on purpose: the target host is
+      # amd64, and oci-mediatypes=false keeps a single-platform push readable.
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: packages/context/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
+          outputs: type=image,push=true,oci-mediatypes=false
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
