@@ -19,7 +19,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import ignore, { type Ignore } from "ignore";
 
 /**
@@ -127,32 +127,44 @@ const DOCUMENTATION_EXTENSIONS = [
 ];
 
 /**
- * Directories to ignore during markdown indexing.
- * Includes test directories, internal docs, and other non-user-facing content.
+ * Directories to ignore during markdown indexing, wherever the scan starts.
+ * Tooling and generated output: these never hold authored documentation.
  */
 const IGNORED_DIRS = new Set([
-  // Test directories
+  // Test tooling
   "__tests__",
   "__test__",
+  "fixtures",
+  "__fixtures__",
+  "__mocks__",
+  // Build/generated directories
+  "node_modules",
+  "dist",
+  "out",
+  ".next",
+  ".nuxt",
+]);
+
+/**
+ * Directories to ignore only when the scan starts at the repo root.
+ * In a code repo these hold tests, internal notes, and code samples; inside a
+ * docs folder they are ordinary sections — docker's content/manuals/build/ is
+ * the whole Docker Build manual, and bun's docs/guides/test/ documents its
+ * test runner.
+ */
+const REPO_ROOT_IGNORED_DIRS = new Set([
+  // Test directories
   "test",
   "tests",
   "spec",
   "specs",
-  "fixtures",
-  "__fixtures__",
-  "__mocks__",
   // Internal/development directories
   "internal",
   "dev",
   "plans",
   ".plans",
-  // Build/generated directories
-  "node_modules",
-  "dist",
+  // Build directories
   "build",
-  "out",
-  ".next",
-  ".nuxt",
   // Other non-doc directories
   "examples", // Often contains code samples, not docs
   "benchmarks",
@@ -407,6 +419,8 @@ function loadGitignore(basePath: string): Ignore {
 export interface FindMarkdownOptions {
   /** Language filter: "all" includes everything, specific code (e.g., "en") includes only that locale */
   lang?: string;
+  /** True when the scan starts at the repo root rather than inside a docs folder */
+  atRepoRoot?: boolean;
 }
 
 /**
@@ -428,7 +442,10 @@ function findMarkdownFiles(
 
     for (const entry of entries) {
       const fullPath = join(dirPath, entry.name);
-      const relativePath = basePath ? join(basePath, entry.name) : entry.name;
+      // Stored paths always use "/" so packages built on Windows match the rest
+      const relativePath = basePath
+        ? posix.join(basePath, entry.name)
+        : entry.name;
 
       // Skip hidden entries
       if (entry.name.startsWith(".")) continue;
@@ -441,13 +458,16 @@ function findMarkdownFiles(
 
       if (entry.isDirectory()) {
         // Skip test, internal, and other non-doc directories
-        if (IGNORED_DIRS.has(entry.name.toLowerCase())) {
+        const dirName = entry.name.toLowerCase();
+        if (
+          IGNORED_DIRS.has(dirName) ||
+          (options.atRepoRoot && REPO_ROOT_IGNORED_DIRS.has(dirName))
+        ) {
           continue;
         }
 
         // Filter locale directories unless --lang all or specific lang matches
         if (isLocaleDir(entry.name)) {
-          const dirName = entry.name.toLowerCase();
           // Include if: all languages, matching lang, or default to English
           if (
             lang === "all" ||
@@ -474,7 +494,12 @@ function findMarkdownFiles(
           const matchingExt = DOCUMENTATION_EXTENSIONS.find((ext) =>
             lowerName.endsWith(ext),
           );
-          if (matchingExt) {
+          // Only at the repo root: these names mean repo housekeeping there,
+          // but anywhere in a docs tree they are ordinary pages — forgejo's
+          // docs/admin/actions/security.md documents Actions security, and was
+          // being dropped as if it were a SECURITY.md policy file. A docs
+          // folder is not the repo root even though the walk starts there.
+          if (matchingExt && basePath === "" && options.atRepoRoot) {
             const baseName = lowerName.slice(0, -matchingExt.length);
             if (IGNORED_FILES.has(baseName)) continue;
           }
@@ -527,7 +552,10 @@ export function readLocalDocsFiles(
   // Load gitignore from repo root
   const ig = loadGitignore(basePath);
 
-  const markdownFiles = findMarkdownFiles(searchPath, ig, "", { lang });
+  const markdownFiles = findMarkdownFiles(searchPath, ig, "", {
+    lang,
+    atRepoRoot: !docsPath,
+  });
   const files: Array<{ path: string; content: string }> = [];
   const seenHashes = new Set<string>();
 
@@ -544,7 +572,7 @@ export function readLocalDocsFiles(
       seenHashes.add(hash);
 
       // Use relative path from docs folder for storage
-      const storagePath = docsPath ? join(docsPath, filePath) : filePath;
+      const storagePath = docsPath ? posix.join(docsPath, filePath) : filePath;
       files.push({ path: storagePath, content });
     } catch {
       // Skip files that can't be read

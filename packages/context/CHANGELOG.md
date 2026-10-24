@@ -1,5 +1,83 @@
 # @neuledge/context
 
+## 1.3.4
+
+### Patch Changes
+
+- [#200](https://github.com/neuledge/context/pull/200) [`a1a022f`](https://github.com/neuledge/context/commit/a1a022fb4bdf7ca1afe26f7da7a324790cb1e38e) Thanks [@human0-bot](https://github.com/apps/human0-bot)! - Refresh zod and defuddle to their latest compatible versions.
+
+## 1.3.3
+
+### Patch Changes
+
+- [#190](https://github.com/neuledge/context/pull/190) [`ec74791`](https://github.com/neuledge/context/commit/ec747912058f42c6274ac47fb5b0baf9cd97b5bb) Thanks [@JayOfTheKeyboard](https://github.com/JayOfTheKeyboard)! - Stop dropping prose sections as tables of contents because their links have long URLs. The table-of-contents check counted each link's full Markdown, URL included, as link text, so a paragraph with two or three long links counted as "mostly links" and was left out of the index. It now compares the link text a reader sees with the rest of the text. Sphinx's generated index pages (`genindex.html`, its per-letter pages and `py-modindex.html`) are alphabetical link catalogs, so they are now left out of the index explicitly rather than by the link ratio. A page is skipped only when it has one of Sphinx's index file names and a tag from Sphinx's index templates, so a guide that uses the same class or shows the markup in an example is still indexed. In the Python 3.14 docs, 154 of 538 pages produced no sections at all, including the C API pages for dict, list, set, tuple and datetime and `library/errno.html`; 51 remain empty after the fix, all of them contents pages or Sphinx's generated indexes.
+
+## 1.3.2
+
+### Patch Changes
+
+- [#195](https://github.com/neuledge/context/pull/195) [`9aed3da`](https://github.com/neuledge/context/commit/9aed3da6ae0a606788239f0e567daf65dcac06d8) Thanks [@human0-bot](https://github.com/apps/human0-bot)! - Allow package builders to store build fingerprints and automatic ingestion revisions in package metadata for registry freshness checks.
+
+## 1.3.1
+
+### Patch Changes
+
+- [#192](https://github.com/neuledge/context/pull/192) [`0ff8614`](https://github.com/neuledge/context/commit/0ff8614042edd81001f365876b29bb06ccab721b) Thanks [@human0-bot](https://github.com/apps/human0-bot)! - Refresh runtime dependencies to their latest compatible versions.
+
+## 1.3.0
+
+### Minor Changes
+
+- [#187](https://github.com/neuledge/context/pull/187) [`7623d67`](https://github.com/neuledge/context/commit/7623d676adb744df40951ec055a8deff66b0e082) Thanks [@human0-bot](https://github.com/apps/human0-bot)! - For stdio sessions, `context serve` now watches the installed packages directory and reloads `get_docs` (notifying connected MCP clients) when a package is installed or removed by a separate `context add` or `context remove` process. `ContextServer.refreshGetDocsTool()` is now a public, supported API. `context remove` now reports unlink failures (including a file that survives the unlink attempt) instead of claiming success.
+
+### Patch Changes
+
+- [#188](https://github.com/neuledge/context/pull/188) [`1997d3c`](https://github.com/neuledge/context/commit/1997d3c4b69fd950dad284d985252a53007bdebe) Thanks [@human0-bot](https://github.com/apps/human0-bot)! - Refresh runtime dependencies to their latest compatible versions.
+
+## 1.2.11
+
+### Patch Changes
+
+- [#147](https://github.com/neuledge/context/pull/147) [`c846a41`](https://github.com/neuledge/context/commit/c846a412a57be20cd0a18466adde650a7e29432e) Thanks [@TheRealBecks](https://github.com/TheRealBecks)! - Preserve installed documentation when a rebuild or install fails. Stage and validate replacements before renaming them into place, and keep temporary databases out of package discovery.
+
+- [#175](https://github.com/neuledge/context/pull/175) [`6193b5c`](https://github.com/neuledge/context/commit/6193b5c40e2630fa75a1ca22fc8fefede596c03e) Thanks [@JayOfTheKeyboard](https://github.com/JayOfTheKeyboard)! - Keep bold, italic, link and inline-code text in section titles. Only a heading's top-level text was read, so words inside formatting or links were dropped from the title, which has the highest search weight. In the Python docs, 300 of 6,475 sections lost words (`Numeric Types — int, float, complex` became `Numeric Types — , , `), including 152 FAQ and guide sections whose heading is a link and which were titled "Introduction". Markdown was hit too: `## Using [superjson](...)` became "Using ". Heading permalinks such as Sphinx's "¶" stay out of the title.
+
+- [#180](https://github.com/neuledge/context/pull/180) [`ed85073`](https://github.com/neuledge/context/commit/ed8507342d59fcc39661bf1af2ae542570f6a63e) Thanks [@TheRealBecks](https://github.com/TheRealBecks)! - Preserve language fences and code indentation when HTML pre/code blocks contain surrounding formatting whitespace or comments.
+
+- [#185](https://github.com/neuledge/context/pull/185) [`ef14e81`](https://github.com/neuledge/context/commit/ef14e81baa9b7b941e3d38b81e0df766f101367e) Thanks [@human0-bot](https://github.com/apps/human0-bot)! - Clean up abandoned `.context-*` package staging directories left behind by a hard shutdown. The next download or setup now reclaims them when their recorded owner process is gone.
+
+## 1.2.10
+
+### Patch Changes
+
+- [#173](https://github.com/neuledge/context/pull/173) [`e3cc56d`](https://github.com/neuledge/context/commit/e3cc56deb57600e63b44d9e8fdaa59d599a65325) Thanks [@JayOfTheKeyboard](https://github.com/JayOfTheKeyboard)! - Keep generic types and JSX inside code examples. The MDX tag cleanup also ran inside fenced blocks and inline code, so `createTRPCClient<AppRouter>()` was indexed as `createTRPCClient()`, `List<String>` as `List`, and `<App />` vanished. Every such code line was damaged in the four doc sets measured: 289 in the NestJS docs, 298 in tRPC, 44 in Kysely and 88 in Drizzle. MDX component tags such as `<AppOnly>` outside code are still removed.
+
+## 1.2.9
+
+### Patch Changes
+
+- [#166](https://github.com/neuledge/context/pull/166) [`b66d7ae`](https://github.com/neuledge/context/commit/b66d7ae99bf8d57597b29d42cf0869664f48f95e) Thanks [@JayOfTheKeyboard](https://github.com/JayOfTheKeyboard)! - Keep documentation sections whose folder shares a name with a skipped repo directory (`build`, `examples`, `test`, `dev`, `internal`, `plans`, `spec`, and the rest) when the scan starts inside a docs folder. These names were skipped at every depth, so with `docs_path` set a real section vanished and the build still reported success: `docker/docs` lost its whole Docker Build manual (`content/manuals/build/`, 100 pages), `cloudflare-docs` lost 49 Workers examples, `kysely` lost 40 of its 67 pages and `bun` lost its 32 test-runner guides. Tooling directories (`node_modules`, `dist`, `out`, `fixtures`, `__tests__` and similar) are still skipped everywhere, and a whole-repo scan skips everything it did before.
+
+## 1.2.8
+
+### Patch Changes
+
+- [#168](https://github.com/neuledge/context/pull/168) [`6a0681c`](https://github.com/neuledge/context/commit/6a0681c4c2cd7a3e41d825a5770451cee6f1ecd2) Thanks [@moshest](https://github.com/moshest)! - Keep underscores inside search words, so snake_case identifiers like `spring_boot` match the identifier instead of the separate words.
+
+- [#146](https://github.com/neuledge/context/pull/146) [`4fdd94b`](https://github.com/neuledge/context/commit/4fdd94b2cf965503899b1d3ccfd6f27e4f9b8e8d) Thanks [@TheRealBecks](https://github.com/TheRealBecks)! - Handle search topics as literal keywords with optional quoted phrases, preventing malformed quotes and FTS operator words from causing SQLite errors. Preserve Unicode keywords and add local ingestion-to-retrieval regression fixtures.
+
+## 1.2.7
+
+### Patch Changes
+
+- [#162](https://github.com/neuledge/context/pull/162) [`e68c31f`](https://github.com/neuledge/context/commit/e68c31fc550e68d4e9b2389f327ef3df0b394e8b) Thanks [@moshest](https://github.com/moshest)! - Store documentation paths with forward slashes on Windows. Adding local or git docs on Windows saved paths like `docs\guide.md`, so the same package built on Windows and Linux had different paths.
+
+## 1.2.6
+
+### Patch Changes
+
+- [#125](https://github.com/neuledge/context/pull/125) [`8663d2f`](https://github.com/neuledge/context/commit/8663d2f91ebef45afe0cd7c3d517134e88dc6705) Thanks [@JayOfTheKeyboard](https://github.com/JayOfTheKeyboard)! - Only skip repo-meta filenames (`security`, `license`, `changelog`, `contributing`, and the rest) when the scan starts at the repository root. They were matched by basename at every depth, and also at the top of a `docs_path` folder, so an ordinary documentation page that happens to share one of those names was dropped without a word. `context add` on the forgejo docs lost `docs/admin/actions/security.md`, the only source in that repo for `container.valid_volumes`, and still reported success. `docker/docs` and `excalidraw/excalidraw` lose pages to the same rule.
+
 ## 1.2.5
 
 ### Patch Changes
@@ -9,6 +87,7 @@
 - [`866ed97`](https://github.com/neuledge/context/commit/866ed9744e50bd9622645c81174d25900e92e3c6) Thanks [@TeeJS](https://github.com/TeeJS)! - Limit registry download sizes to protect local storage from oversized packages.
 
 - [`3e6d1a0`](https://github.com/neuledge/context/commit/3e6d1a021842ab67d7c1089a1dfe4c11a106fbfb) Thanks [@TeeJS](https://github.com/TeeJS)! - `context serve --http` now caps concurrent sessions (`CONTEXT_MAX_SESSIONS`, default 64) and closes sessions idle for longer than `CONTEXT_SESSION_IDLE_TIMEOUT` seconds (default 1800), so clients that disappear without closing their session no longer accumulate in memory. A first request that is not a valid `initialize` no longer leaves an orphaned transport behind.
+- [#137](https://github.com/neuledge/context/pull/137) [`8cc952d`](https://github.com/neuledge/context/commit/8cc952deb2127e5dff725d274b42bdfe72d4dcf7) Thanks [@TheRealBecks](https://github.com/TheRealBecks)! - Preserve code formatting in HTML documentation that uses bare preformatted blocks, including systemd's rendered DocBook manuals.
 
 ## 1.2.4
 

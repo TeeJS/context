@@ -76,6 +76,29 @@ Use brackets for dynamic segments.
     expect(result.sections[2].sectionTitle).toBe("Dynamic Routes");
   });
 
+  it("keeps formatted and linked text in section titles", () => {
+    const source = `## Using [superjson](https://github.com/blitz-js/superjson)
+
+Serializes dates and maps.
+
+## **Should I use \`generate\` or \`push\`?**
+
+They are two different commands.
+
+## The *strict* option
+
+Turns on strict checks.
+`;
+
+    const result = parseMarkdown(source, "docs/faq.md");
+
+    expect(result.sections.map((s) => s.sectionTitle)).toEqual([
+      "Using superjson",
+      "Should I use generate or push?",
+      "The strict option",
+    ]);
+  });
+
   it("uses docTitle from frontmatter", () => {
     const source = `---
 title: My Guide
@@ -169,6 +192,87 @@ Regular content.
     expect(result.sections[0].content).toContain("Regular content");
   });
 
+  it("keeps generics and JSX inside code while removing MDX component tags", () => {
+    const source = `## Section
+
+<AppOnly>
+Call \`createClient<AppRouter>()\` to get a typed \`Promise<Response>\`.
+</AppOnly>
+
+\`\`\`tsx
+const client = createClient<AppRouter>({});
+root.render(<App />);
+\`\`\`
+
+~~~java
+List<String> names = new ArrayList<String>();
+~~~
+`;
+
+    const { content } = parseMarkdown(source, "docs/client.mdx").sections[0];
+
+    expect(content).not.toContain("<AppOnly>");
+    expect(content).toContain("`createClient<AppRouter>()`");
+    expect(content).toContain("`Promise<Response>`");
+    expect(content).toContain("const client = createClient<AppRouter>({});");
+    expect(content).toContain("root.render(<App />);");
+    expect(content).toContain("List<String> names = new ArrayList<String>();");
+  });
+
+  it("pairs code fences by line and length", () => {
+    const source = `## Section
+
+\`\`\`js
+const fence = "\`\`\`";
+render(<App />);
+\`\`\`
+
+Wrap code in \`\`\` fences.
+
+<AppOnly>App router content.</AppOnly>
+
+\`\`\`\`md
+\`\`\`ts
+\`\`\`
+const client = createClient<AppRouter>();
+\`\`\`\`
+
+\`\`\`ts
+const rest = createClient<AppRouter>();
+`;
+
+    const { content } = parseMarkdown(source, "docs/fences.mdx").sections[0];
+
+    expect(content).not.toContain("<AppOnly>");
+    expect(content).toContain("App router content.");
+    expect(content).toContain("render(<App />);");
+    expect(content).toContain("const client = createClient<AppRouter>();");
+    expect(content).toContain("const rest = createClient<AppRouter>();");
+  });
+
+  it("keeps generics in a code block split across section parts", () => {
+    const filler = `const value = compute("${"x".repeat(300)}");`;
+    const code = Array.from({ length: 12 }, () => filler).join("\n\n");
+    const source = `## Setup\n\n\`\`\`ts\n${code}\n\nconst trpc = createTRPCClient<AppRouter>({});\n\`\`\`\n`;
+
+    const { sections } = parseMarkdown(source, "docs/setup.md");
+
+    expect(sections.length).toBeGreaterThan(1);
+    expect(sections.at(-1)?.content).toContain(
+      "createTRPCClient<AppRouter>({});",
+    );
+  });
+
+  it("keeps generics inside code converted from HTML", () => {
+    const { content } = parseHtml(
+      '<h2>Section</h2><p>Returns <code>Optional&lt;User&gt;</code>.</p><pre><code class="language-java">Map&lt;String, List&lt;User&gt;&gt; byTeam;\nList&lt;User&gt; users;</code></pre>',
+      "users.html",
+    ).sections[0];
+
+    expect(content).toContain("`Optional<User>`");
+    expect(content).toContain("List<User> users;");
+  });
+
   it("splits large sections at paragraph boundaries", () => {
     // Create content that exceeds MAX_CHUNK_TOKENS (800)
     const largeParagraph = "This is a paragraph. ".repeat(50); // ~1000 chars = ~250 tokens
@@ -216,6 +320,25 @@ This is the first section with sufficient content for the parser to recognize it
     expect(result.sections[1].sectionTitle).toBe("First Section");
   });
 
+  it("keeps prose with long link URLs and skips a list of links", () => {
+    const source = `## AWS Lambda adapter
+
+The AWS Lambda adapter is supported for API Gateway [REST API(v1)](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-rest-api.html) and [HTTP API(v2)](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api.html) use cases.
+
+## Guides
+
+- [Installation](/docs/getting-started/installation)
+- [Configuration](/docs/getting-started/configuration)
+- [Deployment](/docs/getting-started/deployment)
+`;
+
+    const result = parseMarkdown(source, "docs/aws-lambda.md");
+
+    expect(result.sections.map((s) => s.sectionTitle)).toEqual([
+      "AWS Lambda adapter",
+    ]);
+  });
+
   it("preserves source path in sections", () => {
     const source = `---
 title: Test
@@ -256,6 +379,18 @@ Use the library by importing it into your project.
     expect(result.sections[0].sectionTitle).toBe("Installation");
     expect(result.sections[1].sectionTitle).toBe("Configuration");
     expect(result.sections[2].sectionTitle).toBe("Usage");
+  });
+
+  it("keeps generics in a section long enough to split", () => {
+    const block = `[source,java]\n----\nList<String> names = load("${"x".repeat(300)}");\n----`;
+    const source = `= Guide\n\n== Usage\n\n${Array(12).fill(block).join("\n\n")}\n`;
+
+    const { sections } = parseAsciidoc(source, "docs/guide.adoc");
+
+    expect(sections.length).toBeGreaterThan(1);
+    for (const section of sections) {
+      expect(section.content).toContain("List<String> names");
+    }
   });
 
   it("extracts attributes as frontmatter", () => {

@@ -1,12 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   compareSemver,
   constructTag,
+  isExplicitVersionEntry,
   isVersioned,
-  isZipVersionEntry,
   listDefinitions,
   loadDefinition,
   resolveUrl,
@@ -171,6 +171,36 @@ versions:
     expect(def.versions[0].tag_pattern).toBe("@trpc/server@{version}");
   });
 
+  // Skipped on Windows, where the backslash is a real separator and the file
+  // would land in a missing "@apollo" directory. There the scoped test above
+  // covers the same comparison natively: relative() returns "@trpc\\server".
+  // See #153.
+  const onPosix = it.skipIf(process.platform === "win32");
+  onPosix("accepts a scoped path that uses backslash separators", () => {
+    // On Windows relative() returns "@apollo\\client", which never matched the
+    // "@apollo/client" in the file, so listDefinitions() threw for every scoped
+    // definition. Reproduced here by putting a literal backslash in the filename:
+    // on Linux that is one filename rather than a separator, but the string
+    // reaching the comparison is byte-identical to what Windows produces.
+    const yaml = `
+name: "@apollo/client"
+description: "Apollo Client"
+source:
+  type: git
+  url: https://github.com/apollographql/apollo-client
+  docs_path: docs
+`;
+    const npmDir = join(tempDir, "npm");
+    mkdirSync(npmDir, { recursive: true });
+    const filePath = join(npmDir, "@apollo\\client.yaml");
+    writeFileSync(filePath, yaml);
+
+    const def = loadDefinition(filePath, npmDir);
+
+    expect(def.name).toBe("@apollo/client");
+    expect(def.registry).toBe("npm");
+  });
+
   it("throws when scoped name doesn't match path", () => {
     const yaml = `
 name: "@trpc/client"
@@ -218,6 +248,22 @@ describe("listDefinitions", () => {
     expect(defs).toHaveLength(2);
     expect(defs[0].registry).toBe("npm");
     expect(defs[1].registry).toBe("pip");
+  });
+
+  it("discovers a definition nested several directories deep", () => {
+    // Every Go module path contains slashes, so its definition file lands at
+    // go/github.com/spf13/cobra.yaml. Before the walk became recursive, this
+    // file was never loaded and the build exited 0 with no warning.
+    mkdirSync(join(tempDir, "go", "github.com", "spf13"), { recursive: true });
+    writeFileSync(
+      join(tempDir, "go", "github.com", "spf13", "cobra.yaml"),
+      'name: github.com/spf13/cobra\nversions:\n  - min_version: "1.8.0"\n    tag_pattern: "v{version}"\n    source:\n      type: git\n      url: https://github.com/spf13/cobra\n',
+    );
+
+    const defs = listDefinitions(tempDir);
+    expect(defs).toHaveLength(1);
+    expect(defs[0].name).toBe("github.com/spf13/cobra");
+    expect(defs[0].registry).toBe("go");
   });
 
   it("discovers scoped packages in @scope subdirectories", () => {
@@ -435,11 +481,12 @@ versions:
     expect(isVersioned(def)).toBe(true);
     if (!isVersioned(def)) throw new Error("expected versioned");
     expect(def.versions).toHaveLength(1);
-    expect(isZipVersionEntry(def.versions[0])).toBe(true);
-    if (isZipVersionEntry(def.versions[0])) {
-      expect(def.versions[0].versions).toEqual(["3.14", "3.13"]);
-      expect(def.versions[0].source.type).toBe("zip");
+    const entry = def.versions[0];
+    if (!entry || !isExplicitVersionEntry(entry)) {
+      throw new Error("expected explicit version entry");
     }
+    expect(entry.versions).toEqual(["3.14", "3.13"]);
+    expect(entry.source.type).toBe("zip");
   });
 
   it("parses exclude_paths in zip source", () => {
@@ -465,12 +512,15 @@ versions:
 
     expect(isVersioned(def)).toBe(true);
     if (!isVersioned(def)) throw new Error("expected versioned");
-    if (isZipVersionEntry(def.versions[0])) {
-      expect(def.versions[0].source.exclude_paths).toEqual([
-        "whatsnew/**",
-        "changelog.html",
-      ]);
+    const entry = def.versions[0];
+    if (!entry || !isExplicitVersionEntry(entry)) {
+      throw new Error("expected explicit version entry");
     }
+    expect(entry.source.type).toBe("zip");
+    expect(entry.source.exclude_paths).toEqual([
+      "whatsnew/**",
+      "changelog.html",
+    ]);
   });
 
   it("resolves zip version entry by exact match", () => {
@@ -515,5 +565,36 @@ describe("resolveUrl", () => {
     expect(resolveUrl("https://example.com/docs.zip", "1.0")).toBe(
       "https://example.com/docs.zip",
     );
+  });
+});
+
+describe("effect docs path regression", () => {
+  it("resolves docs_path for 3.14.21 (docs) and 4.0.0 (ai-docs/src)", () => {
+    const def = loadDefinition(
+      resolve(import.meta.dirname, "../../..", "registry/npm/effect.yaml"),
+    );
+
+    expect(def.name).toBe("effect");
+    if (!isVersioned(def)) throw new Error("expected versioned");
+
+    const v3 = resolveVersionEntry(def, "3.14.21");
+    expect(v3).toMatchObject({
+      source: {
+        type: "git",
+        url: "https://github.com/Effect-TS/effect",
+        docs_path: "docs",
+      },
+      tag_pattern: "effect@{version}",
+    });
+
+    const v4 = resolveVersionEntry(def, "4.0.0");
+    expect(v4).toMatchObject({
+      source: {
+        type: "git",
+        url: "https://github.com/Effect-TS/effect",
+        docs_path: "ai-docs/src",
+      },
+      tag_pattern: "effect@{version}",
+    });
   });
 });

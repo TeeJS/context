@@ -17,6 +17,12 @@ registry/pip/fastapi.yaml        → pip/fastapi
 registry/npm/@trpc/server.yaml   → npm/@trpc/server     (scoped: use a subdirectory)
 ```
 
+Go modules use the full module path, so every slash becomes a subdirectory:
+
+```
+registry/go/github.com/spf13/cobra.yaml   → go/github.com/spf13/cobra
+```
+
 Maven coordinates use `_` in place of `:`, since `:` isn't filesystem-safe:
 
 ```
@@ -24,16 +30,20 @@ registry/maven/org.springframework.boot_spring-boot.yaml
 ```
 
 **If the project isn't distributed by a package manager at all** — a language runtime,
-a daemon, a CLI tool — give it a directory named after the project containing a single
-self-named file. That's how the language runtimes are already done:
+a daemon, a CLI tool — give it a directory named after the project, with one
+self-named file per package. A single-package project gets a single file, which is
+how the language runtimes are already done:
 
 ```
 registry/python/python.yaml
 registry/java/java.yaml
 ```
 
-So Docker, Kubernetes, Podman and systemd would be `registry/docker/docker.yaml`,
-`registry/kubernetes/kubernetes.yaml`, and so on.
+So Docker, Kubernetes and Podman would be `registry/docker/docker.yaml`,
+`registry/kubernetes/kubernetes.yaml`, `registry/podman/podman.yaml`, and so on.
+A project that ships more than one package gets more than one file in the same
+directory — systemd, for example, has `registry/systemd/systemd.yaml` and
+`registry/systemd/systemd-guides.yaml`.
 
 The `name:` field inside the file must match the path, or loading fails.
 
@@ -72,7 +82,7 @@ versions:
 
 `{version}` is substituted in both `url` and `docs_path`.
 
-### Versioned by git tag — **only for npm, pip, maven and hex**
+### Versioned by git tag — **only for npm, pip, maven, hex and go**
 
 ```yaml
 versions:
@@ -84,18 +94,173 @@ versions:
       docs_path: docs
 ```
 
-> **This shape only works in `npm/`, `pip/`, `maven/` and `hex/`.** Those are the only
+> **This shape only works in `npm/`, `pip/`, `maven/`, `hex/` and `go/`.** Those are the only
 > registries with a version-discovery API, and this shape asks "which versions exist?"
 > before matching them against `min_version`. In any other directory there is nothing
 > to ask, so the build fails with `Unsupported registry: <dir>` — and because one bad
 > definition fails the whole nightly publish, it takes every other package down with it.
 >
-> Outside those four directories, use **unversioned** or **versioned-by-zip**.
+> Outside those five directories, use **unversioned**, **versioned-by-zip**, or **versioned HTML index**.
+
+#### Go modules
+
+Versions come from `proxy.golang.org`. Two things differ from the other registries:
+
+- **Modules in a subdirectory tag with that directory as a prefix.** A module at
+  `github.com/aws/aws-sdk-go-v2/config` is released as the tag `config/v1.31.1`, not
+  `v1.31.1`, so the default `tag_pattern` names a tag that doesn't exist and the version
+  is skipped as "not published yet", every night. Put the subdirectory in the pattern:
+
+  ```yaml
+  versions:
+    - min_version: "1.31.0"
+      tag_pattern: "config/v{version}"
+      source:
+        type: git
+        url: https://github.com/aws/aws-sdk-go-v2
+        docs_path: config
+  ```
+
+- **`+incompatible` releases are not discovered.** Modules that reached v2+ before adopting
+  Go modules (e.g. `github.com/docker/docker`) publish versions like `v25.0.10+incompatible`,
+  which are skipped with the prereleases. Discovery logs a warning when a module has
+  versions but none match; use **unversioned** for these for now.
+
+
+### Versioned HTML index — for published reference manuals
+
+Use `html-index` when a single HTML table of contents links to all reference
+pages. It downloads those links and uses the existing HTML parser:
+
+```yaml
+versions:
+  - versions: ["258"]
+    source:
+      type: html-index
+      url: "https://www.freedesktop.org/software/systemd/man/{version}/"
+      exclude_paths:
+        - "index.html"
+        - "systemd.directives.html"
+```
+
+This source requires explicit numeric release versions (for example `258` or
+`3.14.0`) and an HTTPS URL containing a `{version}` directory segment. Moving
+aliases such as `latest` are rejected. It works in any registry directory.
+The index may be a directory URL or an `.html`/`.htm` file. Only HTML links
+within that index's directory and origin are downloaded; fragments are removed,
+query links are ignored, and linked pages are not crawled recursively. Redirects
+must stay inside the same directory. Exclusions are relative to that directory.
+
+Downloads use four workers by default (`concurrency: 1..10`) and allow up to
+2,000 pages (`max_pages: 1..5000`). Exceeding that limit, a failed page, or an
+empty index fails the build instead of publishing partial documentation.
+Requests have a 30-second timeout, transient failures are retried twice, and
+responses are limited to 10 MiB each and 128 MiB per build. Identical pages are
+indexed once, which avoids duplicate man-page aliases.
+
+Pinned downloads are reused from `.cache/context/html-index` across builds.
+Delete that directory to refetch a corrected upstream release. The nightly
+publisher compares build fingerprints to skip unchanged releases. Packages with
+legacy metadata retain the skip behavior described below. Check the publisher's crawling policy
+before adding an index source.
+
+For systemd, `systemd/systemd` contains the versioned reference manuals and
+`systemd/systemd-guides` contains the Markdown architecture and integration
+guides from Git. These are separate sources and packages; `docs_path` selects
+a directory within one Git or ZIP source.
+
+
+## Excluding parts of a source
+
+`docs_path` narrows a source to one directory. When the directory you need also holds
+material that belongs to a different package, `exclude_paths` prunes it:
+
+```yaml
+source:
+  type: git
+  url: https://github.com/godotengine/godot-docs
+  ref: stable
+  exclude_paths:
+    - "tutorials/scripting/c_sharp/**"
+```
+
+Patterns are glob-style — `*` matches within a path segment, `**` across segments — and
+are matched against the path **relative to `docs_path`** when one is set, or to the
+repository root when it is not. Excluding everything is an error rather than an empty
+package.
+
+Reach for this when a wider `docs_path` would drag in a sibling language or framework
+that then outranks the docs you actually want; prefer narrowing `docs_path` when the
+content you want is already isolated in its own directory.
 
 ## Supported documentation formats
 
 Markdown (`.md`, `.mdx`), HTML, AsciiDoc (`.adoc`) and reStructuredText (`.rst`).
 Point `docs_path` at the directory holding them; everything else in the repo is ignored.
+
+## Publication freshness and rebuilding
+
+`registry publish` and `registry publish-all` compare `build_fingerprint` metadata
+before building. A matching fingerprint skips work; changed build inputs cause a
+rebuild and an upload to the same package version. Inputs include the resolved Git
+commit or (for pinned ZIP sources) the downloaded archive bytes, the effective
+source settings and package metadata, and an automatically generated ingestion
+revision. Changes to `docs_path`, exclusions, Git language filters, source URL/ref,
+description, or ingestion code can rebuild a package even when the Git commit is
+unchanged. YAML key order, comments, exclusion order/duplicates, and unrelated
+release entries do not change the fingerprint.
+
+The ingestion revision is generated during `pnpm build` and before the
+`pnpm --filter @neuledge/registry registry ...` source CLI runs. The generator starts
+from the registry builder, follows runtime imports and the context APIs it uses,
+and hashes those modules plus their locked runtime dependencies, including
+transitive and optional dependencies and the compiler version. New helper imports
+are discovered automatically. Repository documentation, tests, and unrelated CLI
+or server modules are excluded. Line endings and lockfile key order are normalized.
+Harmless ingestion refactoring can conservatively trigger a rebuild.
+
+The generated revision ships in `dist/ingestion-revision.json`. The built publisher
+needs neither Git history nor TypeScript source files to compute the ingestion
+revision; Git commands are still needed to resolve and build Git sources. Rebuild
+after editing ingestion code if running `src/cli.ts` directly instead of the
+package script. Unversioned ZIP sources continue rebuilding on each publication
+because their URLs provide no immutable source revision. Pinned ZIP releases are
+fingerprinted by their downloaded bytes, so same-version archive changes are
+detected. Pinned HTML releases remain version-derived and are assumed immutable;
+same-version HTML changes are not detected automatically. Refreshing the HTML
+download cache is separate from derived-package freshness.
+
+Servers must expose the uploaded database's `build_fingerprint` on the metadata
+endpoint (see [SERVER_SPEC.md](../SERVER_SPEC.md)). Without that field, versioned
+packages retain the previous existence-based skip behavior, unversioned Git
+packages retain commit comparison, and skips explicitly mention legacy metadata.
+Use `--force` to migrate old packages after the server supports fingerprints:
+
+```bash
+pnpm --filter @neuledge/registry registry publish <name> [version] --force
+pnpm --filter @neuledge/registry registry publish-all --force
+```
+
+`--force` bypasses freshness checks and rebuilds; it does not override the server's
+replacement policy. Both automatic rebuilds and forced builds upload to the same
+registry/name/version. Servers that allow replacement accept the new artifact.
+For Git-sourced uploads, servers that return HTTP 409 are checked for a matching
+package identity, `build_fingerprint`, and `ingestion_revision`. A match confirms
+that the upload already landed, even if its response was lost and the retry
+returned 409. ZIP and HTML-index 409s remain errors rather than being treated as
+successful uploads. Missing or mismatched metadata produces a clear failure. All
+failed uploads report the preserved `.db` path; successful `publish-all` uploads
+remove the local artifact.
+
+`--force` also bypasses the downloaded HTML cache and fetches pages again. Use it
+when upstream HTML changed without a version change; HTML content is not part of
+the automatic fingerprint, and the new package remains subject to the registry's
+replacement policy.
+
+Bulk publishing summarizes skip reasons instead of logging every unchanged
+version. Missing Git tags are warned about and skipped, including tags removed
+after a package was published. Unreachable repositories and other transport
+failures remain errors.
 
 ## Before opening a PR
 

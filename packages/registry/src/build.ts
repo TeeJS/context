@@ -5,26 +5,40 @@
  * to clone repos, read docs, and build SQLite packages.
  *
  * Supports both versioned (clone at specific tag) and unversioned
- * (clone default branch) definitions. Supports git and zip sources.
+ * (clone default branch) definitions. Supports git, zip and HTML index sources.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import {
   type BuildResult,
   buildPackage,
   cloneRepository,
+  initDatabase,
   readLocalDocsFiles,
 } from "@neuledge/context";
-import {
-  constructTag,
-  isGitVersionEntry,
-  resolveUrl,
-  resolveVersionEntry,
-  type UnversionedDefinition,
-  type VersionedDefinition,
+import type {
+  GitSource,
+  PackageDefinition,
+  UnversionedDefinition,
+  VersionedDefinition,
 } from "./definition.js";
-import { downloadAndExtractZip } from "./zip.js";
+import {
+  createBuildFingerprint,
+  getIngestionRevision,
+  sha256Hex,
+} from "./fingerprint.js";
+import { excludeFiles } from "./glob.js";
+import { downloadHtmlIndex } from "./html-index.js";
+import { resolveBuildSource } from "./source.js";
+import {
+  downloadAndExtractZip,
+  downloadZipBuffer,
+  extractZipBuffer,
+} from "./zip.js";
+
+/** Only an absent ref is skippable; transport failures keep their original error. */
+export class MissingSourceRefError extends Error {}
 
 export interface RegistryBuildResult extends BuildResult {
   name: string;
@@ -42,17 +56,54 @@ export function getHeadCommit(url: string, ref?: string): string {
   // Must match the ref the package is built from. Asking for HEAD while building
   // a branch compares two unrelated commits, so the skip-if-unchanged check never
   // fires and the package is rebuilt and republished on every run.
-  const output = execSync(`git ls-remote ${url} ${ref ?? "HEAD"}`, {
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-  }).trim();
+  const requested = ref ?? "HEAD";
+  const output = execFileSync(
+    "git",
+    ["ls-remote", url, requested, `${requested}^{}`],
+    {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  ).trim();
 
-  // Format: "<sha>\tHEAD"
-  const sha = output.split("\t")[0];
+  const refs = new Map(
+    output.split("\n").map((line) => {
+      const [sha, name] = line.split("\t");
+      return [name, sha];
+    }),
+  );
+  // Match clone --branch: prefer a branch, and peel annotated tags to commits.
+  const candidates = requested.startsWith("refs/")
+    ? [requested]
+    : [`refs/heads/${requested}`, `refs/tags/${requested}`, requested];
+  const sha = candidates
+    .map((name) => refs.get(`${name}^{}`) ?? refs.get(name))
+    .find(Boolean);
   if (!sha) {
-    throw new Error(`Failed to get HEAD commit for ${url}`);
+    throw new MissingSourceRefError(
+      `Git reference ${requested} not found in upstream ${url}`,
+    );
   }
   return sha;
+}
+
+function fingerprintOptions(
+  definition: PackageDefinition,
+  version: string,
+  sourceCommit?: string,
+  sourceContentDigest?: string,
+) {
+  const ingestionRevision = getIngestionRevision();
+  return {
+    ingestionRevision,
+    buildFingerprint: createBuildFingerprint(
+      definition,
+      version,
+      sourceCommit,
+      ingestionRevision,
+      sourceContentDigest,
+    ),
+  };
 }
 
 /**
@@ -62,13 +113,10 @@ export async function buildFromDefinition(
   definition: VersionedDefinition,
   version: string,
   outputDir: string,
+  options: { force?: boolean; zipBuffer?: Buffer } = {},
 ): Promise<RegistryBuildResult> {
-  const entry = resolveVersionEntry(definition, version);
-  if (!entry) {
-    throw new Error(
-      `No version entry matches ${version} in ${definition.name}`,
-    );
-  }
+  await initDatabase();
+  const source = resolveBuildSource(definition, version);
 
   // Replace / in scoped names (e.g., @trpc/server → @trpc-server) for valid filenames
   const safeName = definition.name.replace(/\//g, "-");
@@ -77,38 +125,36 @@ export async function buildFromDefinition(
     `${definition.registry}-${safeName}@${version}.db`,
   );
 
-  if (isGitVersionEntry(entry)) {
-    return buildFromGit(
-      entry.source.url,
-      constructTag(entry.tag_pattern, version),
-      entry.source.docs_path,
-      entry.source.lang,
-      outputPath,
-      definition,
-      version,
-    );
+  if (source.type === "git") {
+    return buildFromGit(source, outputPath, definition, version);
   }
 
-  // Zip source: resolve URL template and download
-  const url = resolveUrl(entry.source.url, version);
-  const docsPath = entry.source.docs_path
-    ? resolveUrl(entry.source.docs_path, version)
-    : undefined;
-
-  const files = await downloadAndExtractZip(url, {
-    docsPath,
-    excludePaths: entry.source.exclude_paths,
-  });
+  let files: Array<{ path: string; content: string }>;
+  let sourceContentDigest: string | undefined;
+  if (source.type === "html-index") {
+    files = await downloadHtmlIndex(source, version, { force: options.force });
+  } else {
+    const zipBuffer =
+      options.zipBuffer ?? (await downloadZipBuffer(source.url));
+    sourceContentDigest = sha256Hex(zipBuffer);
+    files = extractZipBuffer(zipBuffer, {
+      docsPath: source.docs_path,
+      excludePaths: source.exclude_paths,
+    });
+  }
 
   if (files.length === 0) {
-    throw new Error(`No documentation files found in ZIP from ${url}`);
+    throw new Error(
+      `No documentation files found in ${source.type} source from ${source.url}`,
+    );
   }
 
   const result = buildPackage(outputPath, files, {
     name: definition.name,
     version,
     description: definition.description,
-    sourceUrl: definition.repository ?? url,
+    sourceUrl: definition.repository ?? source.url,
+    ...fingerprintOptions(definition, version, undefined, sourceContentDigest),
   });
 
   return {
@@ -128,8 +174,9 @@ export async function buildUnversioned(
   definition: UnversionedDefinition,
   outputDir: string,
 ): Promise<RegistryBuildResult> {
+  await initDatabase();
   const version = "latest";
-  const { source } = definition;
+  const source = resolveBuildSource(definition, version);
   const safeName = definition.name.replace(/\//g, "-");
   const outputPath = join(
     outputDir,
@@ -151,6 +198,7 @@ export async function buildUnversioned(
       version,
       description: definition.description,
       sourceUrl: definition.repository ?? source.url,
+      ...fingerprintOptions(definition, version),
     });
 
     return {
@@ -161,25 +209,40 @@ export async function buildUnversioned(
     };
   }
 
-  // Git source: clone and read
+  if (source.type !== "git")
+    throw new Error("Unversioned HTML sources are unsupported");
+  return buildFromGit(source, outputPath, definition, version);
+}
+
+/** Build from a git source (clone at tag, read docs, build package). */
+function buildFromGit(
+  source: GitSource,
+  outputPath: string,
+  definition: PackageDefinition,
+  version: string,
+): RegistryBuildResult {
   const { tempDir, cleanup } = cloneRepository(source.url, source.ref);
 
   try {
-    // Get the commit SHA of the cloned HEAD
-    const sourceCommit = execSync("git rev-parse HEAD", {
+    const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: tempDir,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
-
-    const files = readLocalDocsFiles(tempDir, {
-      path: source.docs_path,
-      lang: source.lang,
-    });
+    // Filter before the emptiness check, so an over-broad exclude_paths fails
+    // loudly here instead of publishing an empty package.
+    const files = excludeFiles(
+      readLocalDocsFiles(tempDir, {
+        path: source.docs_path,
+        lang: source.lang,
+      }),
+      source.exclude_paths,
+      source.docs_path,
+    );
 
     if (files.length === 0) {
       throw new Error(
-        `No documentation files found in ${source.url} (default branch)`,
+        `No documentation files found in ${source.url} at ref ${source.ref ?? "HEAD"}`,
       );
     }
 
@@ -189,6 +252,7 @@ export async function buildUnversioned(
       description: definition.description,
       sourceUrl: definition.repository ?? source.url,
       sourceCommit,
+      ...fingerprintOptions(definition, version, sourceCommit),
     });
 
     return {
@@ -197,43 +261,6 @@ export async function buildUnversioned(
       registry: definition.registry,
       version,
       sourceCommit,
-    };
-  } finally {
-    cleanup();
-  }
-}
-
-/** Build from a git source (clone at tag, read docs, build package). */
-function buildFromGit(
-  url: string,
-  tag: string,
-  docsPath: string | undefined,
-  lang: string,
-  outputPath: string,
-  definition: VersionedDefinition,
-  version: string,
-): RegistryBuildResult {
-  const { tempDir, cleanup } = cloneRepository(url, tag);
-
-  try {
-    const files = readLocalDocsFiles(tempDir, { path: docsPath, lang });
-
-    if (files.length === 0) {
-      throw new Error(`No documentation files found in ${url} at tag ${tag}`);
-    }
-
-    const result = buildPackage(outputPath, files, {
-      name: definition.name,
-      version,
-      description: definition.description,
-      sourceUrl: definition.repository ?? url,
-    });
-
-    return {
-      ...result,
-      name: definition.name,
-      registry: definition.registry,
-      version,
     };
   } finally {
     cleanup();

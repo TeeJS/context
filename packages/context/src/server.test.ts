@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { DatabaseConnection } from "./database.js";
 import { initDatabase } from "./database.js";
 import {
@@ -13,8 +21,18 @@ import {
 } from "./guidance.js";
 import { search } from "./search.js";
 import { ContextServer } from "./server.js";
-import { PackageStore, readPackageInfo } from "./store.js";
+import { type PackageInfo, PackageStore, readPackageInfo } from "./store.js";
 import { createTestDb, insertChunk, rebuildFtsIndex } from "./test-utils.js";
+
+function fakePackage(name: string, version: string): PackageInfo {
+  return {
+    name,
+    version,
+    path: `/${name}@${version}.db`,
+    sizeBytes: 1,
+    sectionCount: 1,
+  };
+}
 
 describe("ContextServer", () => {
   beforeAll(async () => {
@@ -120,6 +138,95 @@ describe("ContextServer", () => {
       }
     } finally {
       if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    }
+  });
+
+  it("sends exactly one tools/list_changed notification when get_docs is refreshed with a change", async () => {
+    const store = new PackageStore();
+    const ctx = new ContextServer(store);
+    // `startHTTP` registers get_docs, so the refresh below takes the update
+    // path rather than the first-registration path.
+    const { server } = await ctx.startHTTP({ port: 0 });
+
+    try {
+      const send = vi.spyOn(ctx.server, "sendToolListChanged");
+
+      store.add(fakePackage("newpkg", "1.0.0"));
+      ctx.refreshGetDocsTool();
+
+      // The SDK's tool update already sends tools/list_changed; the server
+      // must not add a second one on top.
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("publishes once for overlapping install and watcher refreshes", async () => {
+    const store = new PackageStore();
+    const ctx = new ContextServer(store);
+    const { server } = await ctx.startHTTP({ port: 0 });
+
+    try {
+      const send = vi.spyOn(ctx.server, "sendToolListChanged");
+
+      // Server-initiated install: the package is added and get_docs refreshed
+      // immediately.
+      store.add(fakePackage("newpkg", "1.0.0"));
+      ctx.refreshGetDocsTool();
+
+      // The filesystem watcher then observes the same install and refreshes
+      // again; the effective definition is unchanged, so nothing is published.
+      ctx.refreshGetDocsTool();
+
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("publishes again for a later distinct change", async () => {
+    const store = new PackageStore();
+    const ctx = new ContextServer(store);
+    const { server } = await ctx.startHTTP({ port: 0 });
+
+    try {
+      const send = vi.spyOn(ctx.server, "sendToolListChanged");
+
+      store.add(fakePackage("alpha", "1.0.0"));
+      ctx.refreshGetDocsTool();
+      ctx.refreshGetDocsTool(); // unchanged watcher refresh
+      expect(send).toHaveBeenCalledTimes(1);
+
+      store.add(fakePackage("beta", "2.0.0"));
+      ctx.refreshGetDocsTool();
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("registers get_docs exactly once when refresh races startup", async () => {
+    const ctx = new ContextServer(new PackageStore());
+    const registerTool = vi.spyOn(ctx.server, "registerTool");
+
+    // A caller (or an eager refresh) may invoke the public refresh method
+    // before `start()`/`startHTTP()` registers the tools.
+    ctx.refreshGetDocsTool();
+
+    const { server } = await ctx.startHTTP({ port: 0 });
+
+    try {
+      // A package change racing startup is another refresh of the same tool,
+      // and must take the update path rather than registering get_docs again.
+      ctx.refreshGetDocsTool();
+
+      const getDocsCalls = registerTool.mock.calls.filter(
+        ([name]) => name === "get_docs",
+      );
+      expect(getDocsCalls).toHaveLength(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

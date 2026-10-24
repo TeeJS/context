@@ -7,6 +7,7 @@
  */
 
 import { inflateRawSync } from "node:zlib";
+import { compileGlob } from "./glob.js";
 
 const DOCUMENTATION_EXTENSIONS = [
   ".md",
@@ -50,20 +51,25 @@ interface ZipEntry {
 }
 
 /**
- * Download a ZIP file from a URL and extract documentation files.
- * Optionally filters to a specific subdirectory within the archive.
- * Supports exclude patterns (glob-style with * wildcards) to skip unwanted files.
+ * Download a ZIP file from a URL and return its raw bytes.
  */
-export async function downloadAndExtractZip(
-  url: string,
-  options?: { docsPath?: string; excludePaths?: string[] },
-): Promise<Array<{ path: string; content: string }>> {
+export async function downloadZipBuffer(url: string): Promise<Buffer> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to download ZIP from ${url}: ${response.status}`);
   }
+  return Buffer.from(await response.arrayBuffer());
+}
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+/**
+ * Extract documentation files from ZIP archive bytes.
+ * Optionally filters to a specific subdirectory within the archive.
+ * Supports exclude patterns (glob-style with * wildcards) to skip unwanted files.
+ */
+export function extractZipBuffer(
+  buffer: Buffer,
+  options?: { docsPath?: string; excludePaths?: string[] },
+): Array<{ path: string; content: string }> {
   const entries = readCentralDirectory(buffer);
 
   const files: Array<{ path: string; content: string }> = [];
@@ -100,16 +106,13 @@ export async function downloadAndExtractZip(
 }
 
 /**
- * Compile a simple glob pattern to a RegExp.
- * Supports * (any chars except /) and ** (any chars including /).
+ * Download a ZIP file from a URL and extract documentation files.
  */
-function compileGlob(pattern: string): RegExp {
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\0")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\0/g, ".*");
-  return new RegExp(`^${escaped}$`);
+export async function downloadAndExtractZip(
+  url: string,
+  options?: { docsPath?: string; excludePaths?: string[] },
+): Promise<Array<{ path: string; content: string }>> {
+  return extractZipBuffer(await downloadZipBuffer(url), options);
 }
 
 /** Get lowercase file extension including the dot. */

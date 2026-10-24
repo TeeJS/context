@@ -1,6 +1,6 @@
 {
   "name": "@neuledge/registry",
-  "version": "0.0.18",
+  "version": "0.0.29",
   "private": true,
   "description": "Registry infrastructure for building and publishing context packages",
   "type": "module",
@@ -14,10 +14,10 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "rimraf --glob dist/** && tsc -p tsconfig.build.json",
+    "build": "rimraf --glob dist/** && node ../../scripts/generate-ingestion-revision.mjs && tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "registry": "tsx src/cli.ts",
+    "registry": "node ../../scripts/generate-ingestion-revision.mjs && tsx src/cli.ts",
     "test-registry": "tsx src/test-registry.ts",
     "lint": "npx biome ci --error-on-warnings",
     "fix": "npx biome check --write"
@@ -27,6 +27,7 @@
   "dependencies": {
     "@neuledge/context": "workspace:*",
     "commander": "^14.0.0",
+    "linkedom": "^0.18.12",
     "p-retry": "^8.0.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
@@ -38,6 +39,7 @@
     "tsconfig-paths": "^4.2.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
+    "vite": "7.3.5",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^4.0.3"
   },
