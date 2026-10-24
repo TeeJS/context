@@ -38,11 +38,77 @@ for (const tag of REMOVED_TAGS) {
   turndown.remove(tag);
 }
 
+// Permalink anchors in section headings: "¶" (Sphinx, systemd), "§" (rustdoc), "#"
+// (VuePress) or a zero-width space (Docusaurus). Section titles keep link text, so
+// without this they end in the symbol. Only <h2>, which becomes the section title:
+// anchors in other headings stay in the content as before. A rule, not remove():
+// the link rule would match <a> first.
+const PERMALINK_TEXT = /^[¶§#🔗]?$/u;
+turndown.addRule("sectionPermalink", {
+  filter: (node) =>
+    node.nodeName === "A" &&
+    (node.getAttribute("href") ?? "").startsWith("#") &&
+    PERMALINK_TEXT.test(
+      (node.textContent ?? "").replace(/\u200b/g, "").trim(),
+    ) &&
+    node.closest("h2") !== null,
+  replacement: () => "",
+});
+
+// DocBook emits bare <pre> elements; Turndown's code rule requires <pre><code>.
+// Preserve their whitespace and prevent Markdown escaping of unit-file examples.
+// Also recognize a sole <code> child preceded by whitespace or comments.
+turndown.addRule("barePre", {
+  filter: (node) =>
+    node.nodeName === "PRE" && node.firstChild?.nodeName !== "CODE",
+  replacement: (_content, node) => {
+    const codeElement = node.firstElementChild;
+    const isWrappedCode =
+      codeElement?.nodeName === "CODE" &&
+      [...node.childNodes].every(
+        (child) =>
+          child === codeElement ||
+          (child.nodeType === 3 && !/\S/.test(child.textContent ?? "")) ||
+          child.nodeType === 8,
+      );
+    const className = isWrappedCode
+      ? (codeElement.getAttribute("class") ?? "")
+      : "";
+    const language = className.match(/\blanguage-(\S+)/)?.[1] ?? "";
+    const code: string = (isWrappedCode ? codeElement : node).textContent ?? "";
+    const longestRun = (code.match(/`+/g) ?? []).reduce(
+      (longest, run) => Math.max(longest, run.length),
+      0,
+    );
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    return `\n\n${fence}${language}\n${code.replace(/\n$/, "")}\n${fence}\n\n`;
+  },
+});
+
+// Sphinx's generated indexes (genindex*.html, py-modindex.html and other domain
+// indexes) are alphabetical link catalogs, not documentation. Their list markup,
+// plain-text entries, module synopses and Sphinx's page chrome (plain divs that
+// turndown keeps) can hold them under the table-of-contents link ratio. Recognise
+// them by the file name Sphinx gives them and a tag its index templates emit; a guide
+// with only one of the two is still indexed. Domain indexes are named
+// <domain>-<index>.html, and the only built-in one is py-modindex. The markup
+// pattern never crosses a "<", so unclosed tags cannot make it rescan the page.
+// Markup shown in a code sample is escaped (&lt;table) and never matches. The
+// registry's zip reader skips genindex.html and py-modindex.html by name alone
+// (IGNORED_FILES in packages/registry/src/zip.ts); keep the two rules in step.
+const SPHINX_INDEX_FILE =
+  /(?:^|\/)(?:genindex(?:-[^/]+)?|[a-z]+-modindex)\.html?$/;
+const SPHINX_INDEX_MARKUP =
+  /<(?:table\b[^<>]*\bclass="(?:[^"<>]*\s)?indextable[\s"]|div\b[^<>]*\bclass="genindex-jumpbox")/;
+
 /**
  * Parse an HTML file by converting to Markdown, then using the existing
  * Markdown parser for section extraction and chunking.
  */
 export function parseHtml(source: string, filePath: string): ParsedDoc {
+  if (SPHINX_INDEX_FILE.test(filePath) && SPHINX_INDEX_MARKUP.test(source)) {
+    return { path: filePath, frontmatter: {}, sections: [] };
+  }
   const markdown = turndown.turndown(source);
   return parseMarkdown(markdown, filePath);
 }

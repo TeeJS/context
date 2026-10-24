@@ -1,123 +1,306 @@
-import { existsSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { initDatabase } from "./database.js";
+import { downloadPackage } from "./download.js";
+import { buildPackage } from "./package-builder.js";
+import { sweepAbandonedStaging } from "./staging.js";
+import { loadPackages, PackageStore, readPackageInfo } from "./store.js";
 
-describe("downloadPackage size limit", () => {
-  let testHome: string;
+vi.mock("node:os", async (importOriginal) => {
+  const os = await importOriginal<typeof import("node:os")>();
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "context-download-"));
+  return { ...os, homedir: () => home };
+});
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, renameSync: vi.fn(fs.renameSync) };
+});
 
-  beforeEach(() => {
-    testHome = join(
-      tmpdir(),
-      `context-download-home-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+const DATA_DIR = join(homedir(), ".context", "packages");
+const PACKAGE_PATH = join(DATA_DIR, "test-lib@1.0.0.db");
+const OPTIONS = { name: "test-lib", version: "1.0.0" };
+const download = () =>
+  downloadPackage("https://registry.example", "npm", "test-lib", "1.0.0");
+let payload: Uint8Array;
+
+beforeAll(async () => {
+  await initDatabase();
+  const source = join(homedir(), "incoming.db");
+  buildPackage(
+    source,
+    [{ path: "guide.md", content: "## Guide\n\nReplacement documentation." }],
+    OPTIONS,
+  );
+  payload = new Uint8Array(readFileSync(source));
+});
+beforeEach(() => {
+  mkdirSync(DATA_DIR, { recursive: true });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(payload)),
+  );
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.resetAllMocks();
+  vi.unstubAllGlobals();
+  rmSync(DATA_DIR, { recursive: true, force: true });
+});
+afterAll(() => rmSync(homedir(), { recursive: true, force: true }));
+
+function seed(existing: boolean): Buffer | undefined {
+  if (!existing) return;
+  buildPackage(
+    PACKAGE_PATH,
+    [{ path: "old.md", content: "## Original\n\nOriginal documentation." }],
+    OPTIONS,
+  );
+  return readFileSync(PACKAGE_PATH);
+}
+
+describe.each([false, true])(
+  "download (existing installation: %s)",
+  (existing) => {
+    it.each(["network", "stream", "validation", "replacement"])(
+      "preserves installed state after a %s failure",
+      async (stage) => {
+        const original = seed(existing);
+        if (stage === "network") {
+          vi.mocked(fetch).mockRejectedValueOnce(
+            new Error("Network unavailable"),
+          );
+        } else if (stage === "stream") {
+          let sent = false;
+          vi.mocked(fetch).mockResolvedValueOnce(
+            new Response(
+              new ReadableStream({
+                pull(controller) {
+                  if (sent) controller.error(new Error("Download interrupted"));
+                  else {
+                    controller.enqueue(payload.subarray(0, 128));
+                    sent = true;
+                  }
+                },
+              }),
+            ),
+          );
+        } else if (stage === "validation") {
+          vi.mocked(fetch).mockResolvedValueOnce(
+            new Response("invalid database"),
+          );
+        } else {
+          const renameNormally = vi.mocked(renameSync).getMockImplementation();
+          if (!renameNormally)
+            throw new Error("Missing renameSync implementation");
+          vi.mocked(renameSync).mockImplementation((source, destination) => {
+            if (destination === PACKAGE_PATH) {
+              throw Object.assign(new Error("Destination is in use"), {
+                code: "EPERM",
+              });
+            }
+            return renameNormally(source, destination);
+          });
+        }
+
+        await expect(download()).rejects.toThrow();
+        expect(readdirSync(DATA_DIR)).toEqual(
+          existing ? ["test-lib@1.0.0.db"] : [],
+        );
+        if (original) {
+          expect(readFileSync(PACKAGE_PATH)).toEqual(original);
+          expect(readPackageInfo(PACKAGE_PATH).sectionCount).toBe(1);
+        }
+      },
     );
-    process.env.CONTEXT_MAX_DOWNLOAD_BYTES = "10";
-    vi.doMock("node:os", async () => {
-      const actual = await vi.importActual<typeof import("node:os")>("node:os");
-      return { ...actual, homedir: () => testHome };
-    });
-  });
 
-  afterEach(() => {
-    delete process.env.CONTEXT_MAX_DOWNLOAD_BYTES;
-    vi.unstubAllGlobals();
-    vi.doUnmock("node:os");
-    vi.resetModules();
-    if (existsSync(testHome)) {
-      rmSync(testHome, { recursive: true, force: true });
-    }
-  });
+    it("publishes only the complete download and returns its installed path", async () => {
+      seed(existing);
+      let resume: () => void = () => {};
+      let started: () => void = () => {};
+      const paused = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      let sent = false;
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response(
+          new ReadableStream(
+            {
+              async pull(controller) {
+                if (!sent) {
+                  sent = true;
+                  controller.enqueue(payload.subarray(0, 128));
+                } else {
+                  started();
+                  await gate;
+                  controller.enqueue(payload.subarray(128));
+                  controller.close();
+                }
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+        ),
+      );
 
-  it("rejects an oversized declared Content-Length before writing", async () => {
-    let cancelled = false;
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array([1]));
-      },
-      cancel() {
-        cancelled = true;
-      },
+      const pending = download();
+      try {
+        await paused;
+        const store = new PackageStore();
+        loadPackages(store, DATA_DIR);
+        expect(store.list().map((pkg) => pkg.sectionCount)).toEqual(
+          existing ? [1] : [],
+        );
+      } finally {
+        resume();
+        await pending;
+      }
+      expect(await pending).toMatchObject({
+        ...OPTIONS,
+        path: PACKAGE_PATH,
+        sectionCount: 1,
+      });
+      expect(new Uint8Array(readFileSync(PACKAGE_PATH))).toEqual(payload);
+      expect(readdirSync(DATA_DIR)).toEqual(["test-lib@1.0.0.db"]);
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Promise.resolve(
-          new Response(body, { headers: { "content-length": "11" } }),
+  },
+);
+
+it("uses independent staging files for simultaneous downloads of the same package", async () => {
+  const original = seed(true);
+  const downloads = [0, 1].map(() => {
+    let started: () => void = () => {};
+    let resume: () => void = () => {};
+    const paused = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        new ReadableStream(
+          {
+            async pull(controller) {
+              started();
+              await gate;
+              controller.enqueue(payload);
+              controller.close();
+            },
+          },
+          { highWaterMark: 0 },
         ),
       ),
     );
-    const { downloadPackage } = await import("./download.js");
-
-    await expect(
-      downloadPackage("https://registry.example", "npm", "large", "1.0.0"),
-    ).rejects.toThrow("Download size 11 exceeds the 10 byte limit");
-
-    expect(cancelled).toBe(true);
-    expect(existsSync(join(testHome, ".context", "packages"))).toBe(false);
+    return { paused, resume, pending: download() };
   });
+  const stagingDirectories = () =>
+    readdirSync(DATA_DIR).filter((file) => file.startsWith(".context-"));
 
-  it("aborts a chunked response after its streamed bytes exceed the limit", async () => {
-    let cancelled = false;
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(11));
-      },
-      cancel() {
-        cancelled = true;
-      },
+  try {
+    await Promise.all(downloads.map(({ paused }) => paused));
+    expect(stagingDirectories()).toHaveLength(2);
+    expect(readFileSync(PACKAGE_PATH)).toEqual(original);
+
+    downloads[0].resume();
+    expect((await downloads[0].pending).path).toBe(PACKAGE_PATH);
+    expect(stagingDirectories()).toHaveLength(1);
+    expect(new Uint8Array(readFileSync(PACKAGE_PATH))).toEqual(payload);
+
+    downloads[1].resume();
+    expect((await downloads[1].pending).path).toBe(PACKAGE_PATH);
+    expect(new Uint8Array(readFileSync(PACKAGE_PATH))).toEqual(payload);
+    expect(readdirSync(DATA_DIR)).toEqual(["test-lib@1.0.0.db"]);
+  } finally {
+    for (const { resume } of downloads) resume();
+    await Promise.allSettled(downloads.map(({ pending }) => pending));
+  }
+});
+
+it("keeps active staged writes during a staging sweep", async () => {
+  seed(true);
+  const downloads = [0, 1].map(() => {
+    let started: () => void = () => {};
+    let resume: () => void = () => {};
+    const paused = new Promise<void>((resolve) => {
+      started = resolve;
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(body)),
-    );
-    const { downloadPackage } = await import("./download.js");
-
-    await expect(
-      downloadPackage("https://registry.example", "npm", "large", "1.0.0"),
-    ).rejects.toThrow("Download exceeded the 10 byte size limit");
-
-    expect(cancelled).toBe(true);
-    const packagesDir = join(testHome, ".context", "packages");
-    expect(readdirSync(packagesDir)).toEqual([]);
-  });
-
-  it("rejects an invalid configured limit before fetching", async () => {
-    process.env.CONTEXT_MAX_DOWNLOAD_BYTES = "unlimited";
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const { downloadPackage } = await import("./download.js");
-
-    await expect(
-      downloadPackage("https://registry.example", "npm", "large", "1.0.0"),
-    ).rejects.toThrow(
-      "CONTEXT_MAX_DOWNLOAD_BYTES must be a positive integer byte count",
-    );
-
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("uses the default limit when the configured value is blank", async () => {
-    process.env.CONTEXT_MAX_DOWNLOAD_BYTES = "  ";
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array([1]));
-      },
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(body, {
-            headers: { "content-length": "536870913" },
-          }),
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        new ReadableStream(
+          {
+            async pull(controller) {
+              started();
+              await gate;
+              controller.enqueue(payload);
+              controller.close();
+            },
+          },
+          { highWaterMark: 0 },
+        ),
       ),
     );
-    const { downloadPackage } = await import("./download.js");
-
-    await expect(
-      downloadPackage("https://registry.example", "npm", "large", "1.0.0"),
-    ).rejects.toThrow(
-      "Download size 536870913 exceeds the 536870912 byte limit",
-    );
+    return { paused, resume, pending: download() };
   });
+  const stagingDirectories = () =>
+    readdirSync(DATA_DIR).filter((file) => file.startsWith(".context-"));
+
+  try {
+    await Promise.all(downloads.map(({ paused }) => paused));
+    expect(stagingDirectories()).toHaveLength(2);
+
+    // Both staged writes are owned by this live process; the sweep must keep
+    // them so their downloads can still complete.
+    sweepAbandonedStaging(DATA_DIR);
+    expect(stagingDirectories()).toHaveLength(2);
+
+    for (const { resume } of downloads) resume();
+    await Promise.all(downloads.map(({ pending }) => pending));
+
+    expect(readdirSync(DATA_DIR)).toEqual(["test-lib@1.0.0.db"]);
+    expect(new Uint8Array(readFileSync(PACKAGE_PATH))).toEqual(payload);
+  } finally {
+    for (const { resume } of downloads) resume();
+    await Promise.allSettled(downloads.map(({ pending }) => pending));
+  }
+});
+
+it("ignores valid files left under legacy temporary download names", () => {
+  buildPackage(
+    join(DATA_DIR, ".downloading-legacy.db"),
+    [
+      {
+        path: "guide.md",
+        content: "## Guide\n\nUnfinished download documentation.",
+      },
+    ],
+    OPTIONS,
+  );
+  const store = new PackageStore();
+  loadPackages(store, DATA_DIR);
+  expect(store.list()).toEqual([]);
 });

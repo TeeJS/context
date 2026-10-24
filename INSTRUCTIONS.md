@@ -49,7 +49,8 @@ When modifying packages that are published (check for `"private": true` in packa
   Short summary of the change from user's perspective
   ```
 - Bump types: `patch` (bug fixes), `minor` (new features), `major` (breaking changes)
-- Skip changesets for: docs-only changes, test-only changes, internal tooling
+- Runtime dependency refreshes need a changeset even when the declared ranges and public API are unchanged, because the resolved versions users install do change.
+- Skip changesets for: docs-only changes, test-only changes, internal tooling, and development-tool-only dependency refreshes
 
 Why: Changesets automate versioning and changelog generation, ensuring users know what changed between releases.
 
@@ -76,6 +77,25 @@ run concurrently and cannot see each other, so before executing a plan:
 Why: duplicate PRs have twice been opened because a plan sat unclaimed while two
 sessions independently picked it up and built the same thing. The PR is the only
 state both sessions can see, so the claim has to live there.
+
+#### The Shared Branch Is Claimed the Same Way
+
+Sessions here develop on one reused branch name, so it is a shared resource too:
+
+1. Before starting, check whether the branch exists on the remote carrying unmerged
+   commits. If it does, a session is mid-flight — build on it or wait, never reset it.
+2. Reset it to `origin/main` only once its work has landed, and check the content, not
+   a PR's "merged" label. `git merge-base --is-ancestor` proves it for a merge commit,
+   but reports "not merged" after a squash-merge even though the work is in — so when
+   it says no, confirm with an empty `git diff origin/main <branch>` before concluding
+   the branch still holds work.
+3. Run `git fetch --prune` before pushing: a merged PR deletes the remote branch, and
+   a stale tracking ref makes the push fail against something that no longer exists.
+4. Never force-push the shared branch.
+
+Why: a session reset the shared branch to start fresh and its push was rejected by a
+tracking ref left stale by the previous merge. It recovered by pruning, but a second
+session mid-work on that branch would have lost its commits.
 
 ### Task Management
 

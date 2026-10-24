@@ -138,6 +138,7 @@ export class ContextServer {
   private allowedLibraries?: ReadonlySet<string>;
   private getDocsRegistration: ReturnType<McpServer["registerTool"]> | null =
     null;
+  private lastPublishedGetDocsDefinition: string | null = null;
 
   constructor(store: PackageStore, options: ContextServerOptions = {}) {
     this.store = store;
@@ -160,7 +161,7 @@ export class ContextServer {
    * Register all MCP tools. Called before connecting a transport.
    */
   private registerTools(): void {
-    this.registerGetDocsTool(this.visiblePackages());
+    this.publishGetDocsTool(this.visiblePackages());
 
     // When the session is locked to a fixed library set, registry tools are
     // hidden so the agent can't expand its scope mid-session.
@@ -317,51 +318,87 @@ export class ContextServer {
       .describe(GET_DOCS_LIBRARY_DESCRIPTION);
   }
 
+  /**
+   * Stable identity of the effective get_docs tool definition for a package
+   * set. The library schema is derived solely from the sorted package keys
+   * (and the empty/non-empty distinction), so this fully identifies what the
+   * client would observe.
+   */
+  private getDocsDefinition(packages: PackageInfo[]): string {
+    return JSON.stringify(packages.map(packageKey));
+  }
+
+  /**
+   * Publish get_docs for `packages`, notifying clients only when its effective
+   * definition changed since the last successful publication.
+   *
+   * Both the server-initiated install path and the filesystem watcher funnel
+   * through here. Deriving the definition, comparing it, and publishing are
+   * synchronous (the SDK registers/updates and emits `tools/list_changed`
+   * synchronously), so overlapping refreshes are serialized by the event loop
+   * and cannot interleave between the comparison and the publication.
+   */
+  private publishGetDocsTool(packages: PackageInfo[]): void {
+    const definition = this.getDocsDefinition(packages);
+    if (definition === this.lastPublishedGetDocsDefinition) {
+      return;
+    }
+    this.registerGetDocsTool(packages);
+    // Remember only after successful publication so a failed (synchronous)
+    // registration is retried by the next refresh rather than skipped.
+    this.lastPublishedGetDocsDefinition = definition;
+  }
+
   private registerGetDocsTool(packages: PackageInfo[]): void {
+    const paramsSchema = {
+      library: this.buildGetDocsLibrarySchema(packages),
+      topic: z.string().describe(GET_DOCS_TOPIC_DESCRIPTION),
+    };
+    const callback = async ({
+      library,
+      topic,
+    }: {
+      library: string;
+      topic: string;
+    }) => {
+      return this.handleGetDocs(library, topic);
+    };
+
+    // Registration is exactly-once: an early `refreshGetDocsTool()` (before
+    // `start()`) already registered the tool, so a later `registerTools()`
+    // updates the existing registration instead of registering it a second
+    // time and hitting the SDK's "already registered" error.
+    if (this.getDocsRegistration) {
+      // `update` sends tools/list_changed itself via the SDK when connected.
+      this.getDocsRegistration.update({ paramsSchema, callback });
+      return;
+    }
+
     this.getDocsRegistration = this.mcp.registerTool(
       "get_docs",
       {
         description: GET_DOCS_DESCRIPTION,
-        inputSchema: {
-          library: this.buildGetDocsLibrarySchema(packages),
-          topic: z.string().describe(GET_DOCS_TOPIC_DESCRIPTION),
-        },
+        inputSchema: paramsSchema,
       },
-      async ({ library, topic }) => {
-        return this.handleGetDocs(library, topic);
-      },
+      callback,
     );
   }
 
   /**
    * Update the get_docs tool to include newly installed packages.
    * If get_docs doesn't exist yet, register it for the first time.
+   *
+   * Public so the long-running `serve` command can refresh the tool after a
+   * package is installed or removed by a separate `context add`/`remove`
+   * process. Publishing is skipped when the effective tool definition is
+   * unchanged since the last successful publication, so overlapping refreshes
+   * (for example an install and the watcher observing the same install) do not
+   * emit duplicate `tools/list_changed` notifications. The SDK sends
+   * `tools/list_changed` itself after both the update and the first
+   * registration, so callers must not send a second one.
    */
-  private refreshGetDocsTool(): void {
-    const packages = this.visiblePackages();
-
-    if (this.getDocsRegistration) {
-      // Update existing tool with new enum
-      this.getDocsRegistration.update({
-        paramsSchema: {
-          library: this.buildGetDocsLibrarySchema(packages),
-          topic: z.string().describe(GET_DOCS_TOPIC_DESCRIPTION),
-        },
-        callback: async ({
-          library,
-          topic,
-        }: {
-          library: string;
-          topic: string;
-        }) => {
-          return this.handleGetDocs(library, topic);
-        },
-      });
-    } else {
-      this.registerGetDocsTool(packages);
-    }
-
-    this.mcp.sendToolListChanged();
+  public refreshGetDocsTool(): void {
+    this.publishGetDocsTool(this.visiblePackages());
   }
 
   private handleGetDocs(

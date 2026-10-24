@@ -1,0 +1,10 @@
+name: "@strapi/strapi"
+description: "Leading open-source headless CMS for Node.js"
+repository: https://github.com/strapi/strapi
+
+# The strapi/strapi repo's docs/ folder is contributor documentation; user docs
+# live in strapi/documentation, whose tags are site versions, not releases.
+source:
+  type: git
+  url: https://github.com/strapi/documentation
+  docs_path: docusaurus/docs/cms

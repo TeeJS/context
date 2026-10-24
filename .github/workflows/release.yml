@@ -13,10 +13,15 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    outputs:
+      hasChangesets: ${{ steps.changesets.outputs.has-changesets }}
 
     permissions:
       contents: write
       pull-requests: write
+      # npm trusted publishing: npm exchanges this job's OIDC token for a
+      # short-lived publish credential, so no NPM_TOKEN secret is stored.
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -34,7 +39,11 @@ jobs:
         with:
           node-version: '22'
           cache: 'pnpm'
-          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1; pnpm 10 publishes through the
+      # npm CLI, and Node 22 bundles npm 10.
+      - name: Upgrade npm
+        run: npm install -g npm@11
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -52,14 +61,95 @@ jobs:
 
       - name: Create Release PR or Publish
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
-          version: pnpm versions
-          publish: pnpm -r publish
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          version-script: pnpm versions
+          publish-script: pnpm -r publish
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          push-with-git-cli: true
+          create-github-releases: false
+          push-git-tags: false
 
+      # The v2 action's `published` output reflects the `changeset publish`
+      # output file (`CHANGESETS_OUTPUT`), which `pnpm -r publish` never
+      # writes. The action runs the publish script exactly when no changesets
+      # are pending, and `pnpm tags` skips tags that already exist, so gate on
+      # `has-changesets` instead.
       - name: Tag releases
-        if: steps.changesets.outputs.published == 'true'
+        if: steps.changesets.outputs.has-changesets == 'false'
         run: pnpm tags
+
+  # A separate job so an MCP Registry failure shows on its own without marking
+  # the npm release as failed.
+  mcp-registry:
+    name: Publish to MCP Registry
+    needs: release
+    # Same gate as "Tag releases": `published` never turns true here.
+    if: needs.release.outputs.hasChangesets == 'false'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # `mcp-publisher login github-oidc` exchanges this job's OIDC token for
+      # publish rights on io.github.neuledge/*, so no registry secret is stored.
+      id-token: write
+
+    env:
+      # Bump when the registry rejects logins with "invalid audience".
+      MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Publish only a version the MCP Registry lacks, so pushes that release
+      # nothing new are no-ops and a failed publish is retried by the next one.
+      - name: Check MCP Registry version
+        id: check
+        run: |
+          version=$(jq -r .version packages/context/package.json)
+          name=$(jq -r .name server.json)
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://registry.modelcontextprotocol.io/v0/servers/${name/\//%2F}/versions/$version")
+          case "$status" in
+            200) echo "$name@$version is already in the MCP Registry" ;;
+            404) echo "version=$version" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unexpected MCP Registry status $status"; exit 1 ;;
+          esac
+
+      - name: Install mcp-publisher
+        if: steps.check.outputs.version
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$MCP_PUBLISHER_VERSION/mcp-publisher_linux_amd64.tar.gz"
+          echo "$MCP_PUBLISHER_SHA256  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Set version in server.json
+        if: steps.check.outputs.version
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+          mv server.tmp server.json
+
+      # The registry checks the npm package's mcpName, so wait until npm serves
+      # the version that was just published.
+      - name: Wait for npm
+        if: steps.check.outputs.version
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          for _ in $(seq 20); do
+            [ "$(npm view "@neuledge/context@$VERSION" version)" = "$VERSION" ] && exit 0
+            sleep 15
+          done
+          echo "@neuledge/context@$VERSION is not on npm"
+          exit 1
+
+      - name: Publish server
+        if: steps.check.outputs.version
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

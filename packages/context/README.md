@@ -9,6 +9,7 @@
   <a href="https://www.npmjs.com/package/@neuledge/context"><img src="https://img.shields.io/npm/v/@neuledge/context.svg" alt="npm version"></a>
   <a href="https://github.com/neuledge/context/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.0-blue.svg" alt="TypeScript"></a>
+  <a href="https://human0.ai/oss/neuledge-context/badge"><img src="https://human0.ai/oss/badge.svg" alt="Maintained by human0"></a>
 </p>
 
 ---
@@ -33,6 +34,12 @@ Context is an MCP server backed by a [community-driven package registry](registr
 
 <p align="center">
   <img src="https://media.githubusercontent.com/media/neuledge/context/main/packages/context/assets/ai-sdk-demo.gif" alt="Context demo" width="800">
+</p>
+
+<p align="center">
+  <a href="https://human0.ai/oss/neuledge-context/banner">
+    <img src="https://human0.ai/oss/banner.svg" alt="Maintained by human0">
+  </a>
 </p>
 
 ---
@@ -296,6 +303,12 @@ context add ./my-project --name my-lib --pkg-version 2.0 --save ./packages/
 # Teammate installs it (no build step needed)
 context add ./packages/my-lib@2.0.db
 ```
+
+Rebuilds and installs stage a replacement beside the destination, then close and
+validate it before replacing the installed package. A failed build, download, or
+replacement leaves the previous package available. Temporary files are excluded
+from package discovery. If the operating system blocks replacement of an open
+file (for example, on Windows), close the reader and retry the install.
 
 ---
 
@@ -581,12 +594,7 @@ The HTTP server bounds its own resource use so clients that disappear without cl
 | `CONTEXT_MAX_SESSIONS` | `64` | Maximum concurrent MCP sessions. New sessions beyond this get HTTP 503 with a `Retry-After` header. |
 | `CONTEXT_SESSION_IDLE_TIMEOUT` | `1800` | Seconds a session may sit with no requests and no open SSE stream before the server closes it. A client whose session was closed gets HTTP 404 and must re-initialize. |
 
-The HTTP server bounds its own resource use so clients that disappear without closing their session cannot exhaust it. Tune the limits with environment variables (positive integers; an invalid value is a startup error):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CONTEXT_MAX_SESSIONS` | `64` | Maximum concurrent MCP sessions. New sessions beyond this get HTTP 503 with a `Retry-After` header. |
-| `CONTEXT_SESSION_IDLE_TIMEOUT` | `1800` | Seconds a session may sit with no requests and no open SSE stream before the server closes it. A client whose session was closed gets HTTP 404 and must re-initialize. |
+Running stdio sessions reload automatically. While a stdio `context serve` is connected, a separate `context add` or `context remove` updates the server's installed-package list and refreshes the `get_docs` tool, so the connected MCP client picks up the change via a `tools/list_changed` notification without reconnecting or restarting the server. This live reload is stdio-only: an HTTP server started with `--http` does not watch the package directory, so restart it to see packages added or removed by the CLI.
 
 ### `context query <library> <topic>`
 
@@ -601,6 +609,18 @@ context query nextjs 'middleware authentication'
 
 # Returns the same JSON format as the MCP get_docs tool
 ```
+
+Topics are literal keywords, matched together (AND). Punctuation separates words,
+so `ExecStart=`, `systemctl --user`, and `spring.main.banner-mode` can be used
+directly. Underscores stay inside a word, so `spring_boot` matches the identifier
+rather than the two words apart. Words such as `AND`, `OR`, `NOT`, and `NEAR` are searched as text;
+advanced FTS syntax is not supported.
+
+Use paired double quotes for a phrase, for example
+`context query nextjs '"server components" rendering'`. Phrase words must appear
+next to each other in order, with the usual search stemming. An unmatched double
+quote is ignored and the remaining words are searched as keywords. Empty or
+punctuation-only topics return no results. These rules also apply to MCP `get_docs`.
 
 ---
 
@@ -671,6 +691,7 @@ Yes! The `registry/` directory has YAML definitions organized by package manager
 - **`registry/npm/`** — JavaScript/TypeScript (Next.js, React, Tailwind, etc.)
 - **`registry/pip/`** — Python (FastAPI, Flask, Django, Pydantic)
 - **`registry/maven/`** — Java (Spring Boot, JUnit, Micrometer)
+- **`registry/go/`** — Go modules, by full module path (Cobra)
 
 To add a package, create a YAML file. Two source types are supported:
 
@@ -709,7 +730,7 @@ versions:
         - "changelog.html"
 ```
 
-Version discovery is supported for npm, PyPI, and Maven Central. See existing definitions for examples.
+Version discovery is supported for npm, PyPI, Maven Central, Hex, and the Go module proxy. See existing definitions for examples.
 
 ---
 

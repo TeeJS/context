@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -12,9 +12,11 @@ import {
   compareVersions,
   getPackageFileName,
   isAllowedLibrary,
+  loadPackages,
   type PackageInfo,
   PackageStore,
   readPackageInfo,
+  reloadPackages,
 } from "./store.js";
 import { createTestDb, insertChunk, rebuildFtsIndex } from "./test-utils.js";
 
@@ -109,6 +111,116 @@ describe("store", () => {
       db.close();
 
       expect(() => readPackageInfo(path)).toThrow("missing name or version");
+    });
+  });
+
+  describe("reloadPackages", () => {
+    it("keeps an already loaded package whose file exists but cannot be read", () => {
+      createTestPackage(TEST_PACKAGE_PATH, {
+        name: "test-lib",
+        version: "1.0.0",
+      });
+      const store = new PackageStore();
+      store.add(readPackageInfo(TEST_PACKAGE_PATH));
+
+      // Corrupt the file so the next read fails, but leave it on disk.
+      writeFileSync(TEST_PACKAGE_PATH, "not a database");
+
+      reloadPackages(store, TEST_DIR);
+
+      expect(store.list()).toHaveLength(1);
+      expect(store.get("test-lib@1.0.0")?.path).toBe(TEST_PACKAGE_PATH);
+    });
+
+    it("ignores `.downloading-*` staging files", () => {
+      createTestPackage(TEST_PACKAGE_PATH, {
+        name: "test-lib",
+        version: "1.0.0",
+      });
+
+      // A staged download whose temporary name still ends in `.db`.
+      const stagedPath = join(TEST_DIR, ".downloading-123-staged.db");
+      createTestPackage(stagedPath, { name: "staged", version: "9.9.9" });
+
+      const store = new PackageStore();
+      reloadPackages(store, TEST_DIR);
+
+      const names = store.list().map((p) => p.name);
+      expect(names).toContain("test-lib");
+      expect(names).not.toContain("staged");
+    });
+
+    it("removes an entry only once its file is confirmed absent", () => {
+      createTestPackage(TEST_PACKAGE_PATH, {
+        name: "test-lib",
+        version: "1.0.0",
+      });
+      const secondPath = join(TEST_DIR, "other@2.0.0.db");
+      createTestPackage(secondPath, { name: "other", version: "2.0.0" });
+
+      const store = new PackageStore();
+      store.add(readPackageInfo(TEST_PACKAGE_PATH));
+      store.add(readPackageInfo(secondPath));
+
+      // Delete only the second package's file.
+      rmSync(secondPath);
+
+      reloadPackages(store, TEST_DIR);
+
+      const keys = store.list().map((p) => `${p.name}@${p.version}`);
+      expect(keys).toEqual(["test-lib@1.0.0"]);
+    });
+
+    it("keeps entries when the directory temporarily disappears and reconciles once it returns", () => {
+      createTestPackage(TEST_PACKAGE_PATH, {
+        name: "test-lib",
+        version: "1.0.0",
+      });
+      const store = new PackageStore();
+      store.add(readPackageInfo(TEST_PACKAGE_PATH));
+
+      // Removing the directory is not proof its package was removed; the live
+      // store must survive the temporary disappearance without pruning.
+      rmSync(TEST_DIR, { recursive: true });
+      reloadPackages(store, TEST_DIR);
+      expect(store.list()).toHaveLength(1);
+
+      // Once the directory is back (empty), the now-confirmed absence prunes.
+      mkdirSync(TEST_DIR, { recursive: true });
+      reloadPackages(store, TEST_DIR);
+      expect(store.list()).toHaveLength(0);
+    });
+
+    it("adds a package installed after the initial load", () => {
+      const store = new PackageStore();
+      reloadPackages(store, TEST_DIR);
+      expect(store.list()).toHaveLength(0);
+
+      createTestPackage(TEST_PACKAGE_PATH, {
+        name: "test-lib",
+        version: "1.0.0",
+      });
+      reloadPackages(store, TEST_DIR);
+
+      expect(store.get("test-lib")?.version).toBe("1.0.0");
+    });
+  });
+
+  describe("loadPackages", () => {
+    it("loads package databases and ignores `.downloading-*` staging files", () => {
+      createTestPackage(TEST_PACKAGE_PATH, {
+        name: "test-lib",
+        version: "1.0.0",
+      });
+      const stagedPath = join(TEST_DIR, ".downloading-123-staged.db");
+      createTestPackage(stagedPath, { name: "staged", version: "9.9.9" });
+
+      const store = new PackageStore();
+      loadPackages(store, TEST_DIR);
+
+      const names = store.list().map((p) => p.name);
+      expect(names).toContain("test-lib");
+      expect(names).not.toContain("staged");
     });
   });
 

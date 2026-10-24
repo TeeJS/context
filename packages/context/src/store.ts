@@ -1,4 +1,5 @@
-import { statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { type DatabaseConnection, openDatabase } from "./database.js";
 import { getMetaValue, getSectionCount, validatePackageSchema } from "./db.js";
 
@@ -178,6 +179,84 @@ export class PackageStore {
     const pkg = this.get(spec);
     if (!pkg) return null;
     return openDatabase(pkg.path, { readonly: true });
+  }
+}
+
+/**
+ * True for package database files. Staged `.downloading-*` downloads are
+ * excluded: their names may end in `.db` before the write is finished.
+ */
+function isPackageFile(file: string): boolean {
+  return file.endsWith(".db") && !file.startsWith(".downloading-");
+}
+
+/** Load installed packages, ignoring staged downloads and invalid databases. */
+export function loadPackages(store: PackageStore, directory: string): void {
+  if (!existsSync(directory)) return;
+
+  for (const file of readdirSync(directory)) {
+    if (!isPackageFile(file)) continue;
+    try {
+      store.add(readPackageInfo(join(directory, file)));
+    } catch {
+      // Skip invalid packages.
+    }
+  }
+}
+
+/**
+ * True only when a package file is positively gone: `stat` reports ENOENT (the
+ * file does not exist) or ENOTDIR (a path component is not a directory, so the
+ * file cannot exist there). Permission errors and other transient failures are
+ * not proof of absence, so the entry is kept.
+ */
+function isFileConfirmedAbsent(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") {
+      return false;
+    }
+
+    return true;
+  }
+}
+
+/**
+ * Reconcile a live store with the packages on disk: add newly installed
+ * packages and drop entries whose files are gone. A package whose file still
+ * exists but cannot be read (a partial or unreadable database) is left
+ * untouched — its absence is not confirmed, and a later reload may succeed once
+ * the writer finishes.
+ */
+export function reloadPackages(store: PackageStore, directory: string): void {
+  let files: string[];
+  try {
+    // A missing package directory is not proof that its packages were removed:
+    // keep the store as-is so a later reload reconciles once it returns.
+    if (!existsSync(directory)) return;
+    files = readdirSync(directory);
+  } catch {
+    // The directory cannot be inspected; keep the store as-is rather than drop
+    // entries whose absence cannot be confirmed.
+    return;
+  }
+
+  for (const file of files) {
+    if (!isPackageFile(file)) continue;
+    try {
+      store.add(readPackageInfo(join(directory, file)));
+    } catch {
+      // Keep any existing entry: the file is still present.
+    }
+  }
+
+  for (const pkg of store.list()) {
+    if (isFileConfirmedAbsent(pkg.path)) {
+      store.remove(packageKey(pkg));
+    }
   }
 }
 
